@@ -95,7 +95,7 @@
             minute: '2-digit',
           })}.
         </p>
-        <p>Reiniciar Nodo no cierra esta sesión.</p>{/if}
+        <p>Reiniciar Nodes no cierra esta sesión.</p>{/if}
     </div>
   </div>
   {#if message}<p class="notice success" role="status">{message}</p>{/if}
