@@ -1,0 +1,20 @@
+[Unit]
+Description=Nodo - administrador de servidores
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nodo
+Group=nodo
+WorkingDirectory=/var/lib/nodo
+EnvironmentFile=/etc/nodo/nodo.env
+ExecStart=/opt/nodo/nodo -listen 127.0.0.1 -port 8080 -data /var/lib/nodo/panel.db -public-url https://nodo.ejemplo.com
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

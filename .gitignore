@@ -1,0 +1,46 @@
+.tools/
+node_modules/
+web/dist/*
+!web/dist/.gitkeep
+data/
+bin/
+*.log
+__pycache__/
+*.pyc
+
+# Datos privados, claves y copias locales
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.ssh/
+secrets/
+backups/
+*.bak
+
+# Referencias y evidencias locales: pueden mostrar servidores reales
+design/
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+docs/*.webp
+.DS_Store
+Thumbs.db
+
+# Pruebas e informes locales: no forman parte de la publicación
+*_test.go
+web/tests/
+scripts/test_*.py
+docs/REVISION-TECNICA.md
