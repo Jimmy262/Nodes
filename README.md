@@ -33,6 +33,8 @@ Después de compilar puedes iniciar directamente:
 - Biblioteca Compose con PostgreSQL, Redis, n8n y Supabase, con credenciales generadas para cada instalación.
 - Edición de aplicaciones compatibles y operaciones de eliminación o traslado con revisión y confirmación.
 
+La [edición directa de configuración](docs/EDICION-DIRECTA.md) utiliza SSH, Docker Swarm o los archivos Compose originales; no requiere una clave API de Dokploy.
+
 Las funciones remotas requieren las herramientas y permisos correspondientes en cada VPS. El traslado automático tiene restricciones de arquitectura, redes, volúmenes y tipo de aplicación; la revisión indica qué se admite antes de ejecutar. No traslada DNS, certificados ni datos externos.
 
 ## Conectar un servidor
