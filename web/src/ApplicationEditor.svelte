@@ -33,9 +33,7 @@
     domainService = '',
     port = 80,
     secure = true;
-  let key = '',
-    connectionOpen = false,
-    copied = false,
+  let copied = false,
     plan = null,
     job = null,
     jobID = '',
@@ -90,24 +88,6 @@
     domainService = d?.service || environment[0]?.name || '';
     port = d?.port || 80;
     secure = d ? d.https : true;
-  }
-  async function connect() {
-    pending = true;
-    error = '';
-    try {
-      await api(`/servers/${app.serverId}/dokploy/connect`, {
-        method: 'POST',
-        body: JSON.stringify({ key }),
-        signal: AbortSignal.timeout(150000),
-      });
-      key = '';
-      connectionOpen = false;
-      await load();
-    } catch (e) {
-      error = e.message;
-    } finally {
-      pending = false;
-    }
   }
   function addVariable() {
     environment = environment.map((service) =>
@@ -228,7 +208,6 @@
     return () => {
       alive = false;
       clearInterval(timer);
-      key = '';
       envText = '';
       environment = [];
       config = null;
@@ -275,36 +254,9 @@
     <button class="secondary" on:click={close}>Volver a la aplicación</button>
   {:else if config}
     <p class="small muted">Nombre, dominio y variables, sin salir de este formulario.</p>
-    {#if config.connectionRequired || connectionOpen}
-      <div class="editor-connection">
-        <h3>Conectar Dokploy</h3>
-        <p>
-          Solo una vez para <strong>{app.server.name}</strong>. Crea una clave en Dokploy → Ajustes
-          → Perfil → API/CLI y pégala aquí.
-        </p>
-        <label class="field"
-          >Clave API existente<input
-            type="password"
-            bind:value={key}
-            autocomplete="off"
-            placeholder="Pega tu clave de Dokploy"
-            disabled={pending}
-          /></label
-        >
-        <button class="secondary" disabled={pending || !key.trim()} on:click={connect}
-          >{pending ? 'Conectando…' : 'Conectar y cargar configuración'}</button
-        >
-        <small
-          >Se guarda cifrada para tu cuenta de Windows. La conexión usa el SSH de este servidor.</small
-        >
-      </div>
-    {:else if config.manager === 'Dokploy'}<div class="editor-manager">
-        <span><CheckCircle2 size={14} />Dokploy conectado</span><button
-          class="text-button small"
-          on:click={() => (connectionOpen = true)}
-          disabled={pending || !!plan}>Cambiar clave</button
-        >
-      </div>{/if}
+    <div class="editor-manager">
+      <span><CheckCircle2 size={14} />Gestión directa · {config.manager}</span>
+    </div>
     <form class="deployment-form" on:submit={review}>
       <fieldset disabled={pending || !!plan}>
         <label class="field"
