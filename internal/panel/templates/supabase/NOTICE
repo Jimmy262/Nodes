@@ -3,7 +3,9 @@ Source: https://github.com/supabase/supabase/tree/self-hosted/v0.7.0/docker
 License: Apache License, Version 2.0 (included as LICENSE).
 
 The source Compose, SQL, gateway, pooler and Edge Function files are bundled
-without changes. Nodo adapts the Compose in memory for each new deployment:
+with example webhook signing secrets in Compose comments replaced by environment
+variable references to avoid publishing credential-shaped examples. These hooks
+remain commented out. Nodo adapts the Compose in memory for each new deployment:
 - removes global project/container names and auxiliary published ports;
 - adds a project-local Realtime hostname/network alias;
 - stores database, storage and snippets in project-owned named volumes;

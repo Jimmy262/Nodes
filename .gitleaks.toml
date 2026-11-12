@@ -1,0 +1,11 @@
+title = "Nodes secret scanning"
+
+[extend]
+useDefault = true
+
+# Detect webhook examples too, even when they occur inside comments.
+[[rules]]
+id = "nodes-webhook-signing-secret"
+description = "Webhook signing secret or credential-shaped example"
+regex = '''whsec_[A-Za-z0-9+/=_-]{16,}'''
+keywords = ["whsec_"]
