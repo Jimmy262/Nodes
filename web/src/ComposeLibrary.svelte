@@ -279,7 +279,7 @@
       </h3>
       <p>{job.message}</p>
       {#if job.status === 'running'}<p class="small muted">
-          Puedes seguir el progreso en Actividad. Mantén Nodo abierto hasta que termine.
+          Puedes seguir el progreso en Actividad. Mantén Nodes abierto hasta que termine.
         </p>{/if}
     </div>
     {#if job.status === 'succeeded'}

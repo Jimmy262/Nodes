@@ -22,6 +22,8 @@
   import ApplicationEditor from './ApplicationEditor.svelte';
   import HistoryChart from './HistoryChart.svelte';
   import AuthScreen from './AuthScreen.svelte';
+  import BrandLogo from './BrandLogo.svelte';
+  import ThemeControl from './ThemeControl.svelte';
   import SecurityDialog from './SecurityDialog.svelte';
   import ServerNameEditor from './ServerNameEditor.svelte';
   import OperationDialog from './OperationDialog.svelte';
@@ -341,14 +343,9 @@
     if (authenticated) refresh();
   }}
 />
-<svelte:head
-  ><title>Nodo · {view === 'apps' ? 'Aplicaciones' : 'Servidores'}</title><meta
-    name="theme-color"
-    content="#FAFBF9"
-  /></svelte:head
->
+<svelte:head><title>Nodes · {view === 'apps' ? 'Aplicaciones' : 'Servidores'}</title></svelte:head>
 {#if !ready}<div class="boot">
-    <span class="wordmark">nodo<span>.</span></span>
+    <BrandLogo />
     <p>Abriendo tu infraestructura…</p>
   </div>
 {:else if !authenticated}
@@ -357,10 +354,10 @@
   <div class="shell">
     <aside class="sidebar">
       <a
-        class="wordmark"
+        class="brand-link"
         href="#aplicaciones"
         on:click={() => (view = 'apps')}
-        aria-label="Nodo, aplicaciones">nodo<span>.</span></a
+        aria-label="Nodes, aplicaciones"><BrandLogo /></a
       >
       <nav aria-label="Navegación principal">
         <button
@@ -376,6 +373,7 @@
         >
       </nav>
       <div class="sidebar-bottom">
+        <ThemeControl />
         <button
           class="security-shortcut"
           on:click={() => (securityOpen = true)}
@@ -865,7 +863,7 @@
       >
       <div class="remove-section">
         {#if confirmRemoval}<p>
-            ¿Quitar este servidor de Nodo? Se borrarán su registro e histórico locales. Sus
+            ¿Quitar este servidor de Nodes? Se borrarán su registro e histórico locales. Sus
             aplicaciones seguirán funcionando.
           </p>
           <div class="button-row">
