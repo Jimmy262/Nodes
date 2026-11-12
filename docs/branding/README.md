@@ -51,6 +51,8 @@ En **Apariencia**, disponible en la barra lateral y en el acceso al panel, elige
 
 Las paletas están declaradas en `web/src/lib/themes.js`. De ellas se derivan los roles de fondo, texto, superficie, acción, foco, selección, gráficas y terminal. La preferencia se guarda en `nodes.appearance.v1`; una selección desconocida vuelve a Violeta pulso. El favicon y los archivos descargables representan la identidad violeta principal.
 
+La flecha junto al logo contrae y expande el menú. En escritorio deja una barra de iconos y amplía el espacio del contenido; en móvil oculta la navegación conservando el control para abrirla. El estado se recuerda en este navegador. La transición dura 240 ms y se desactiva si el sistema solicita movimiento reducido.
+
 ## Brief del tablero
 
 Generado con la herramienta integrada ImageGen y las habilidades imagegen y brandkit. Prompt de dirección: desarrollar el branding de Nodes con la opción 03 Violeta pulso, conservar el símbolo exacto de tres nodos, y mostrar logotipo, variantes sobre fondos claros/oscuros, área de seguridad, icono, favicon, paleta, tipografía, patrón, encabezado de aplicación y controles. Estilo profesional, legible, violeta vivo, superficies claras y contraste berenjena.

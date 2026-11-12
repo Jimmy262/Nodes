@@ -39,6 +39,7 @@
   const api = client.api;
   let lastOverview = null;
   const saved = storageRead('nodo.view.v2', {});
+  let sidebarClosed = storageRead('nodes.sidebar.closed.v1', false) === true;
   let authenticated = false,
     ready = false,
     loaded = false;
@@ -140,6 +141,7 @@
   $: if (historyKey) refreshHistories(historyKey);
   $: storageWrite('nodo.view.v2', { view, selection, query, filter, sort });
   $: storageWrite('nodo.favorites', favorites);
+  $: storageWrite('nodes.sidebar.closed.v1', sidebarClosed);
   async function refresh() {
     if (refreshInFlight || designPreview) return;
     refreshInFlight = true;
@@ -351,25 +353,42 @@
 {:else if !authenticated}
   <AuthScreen {api} state={authState} initialError={authError} onAuthenticated={signedIn} />
 {:else}
-  <div class="shell">
+  <div class="shell" class:sidebar-closed={sidebarClosed}>
     <aside class="sidebar">
-      <a
-        class="brand-link"
-        href="#aplicaciones"
-        on:click={() => (view = 'apps')}
-        aria-label="Nodes, aplicaciones"><BrandLogo /></a
-      >
-      <nav aria-label="Navegación principal">
+      <div class="sidebar-header">
+        <a
+          class="brand-link"
+          href="#aplicaciones"
+          on:click={() => (view = 'apps')}
+          aria-label="Nodes, aplicaciones"><BrandLogo /></a
+        >
         <button
+          type="button"
+          class="sidebar-toggle"
+          aria-label={sidebarClosed ? 'Expandir menú' : 'Contraer menú'}
+          title={sidebarClosed ? 'Expandir menú' : 'Contraer menú'}
+          aria-expanded={!sidebarClosed}
+          aria-controls="nodes-navigation"
+          on:click={() => (sidebarClosed = !sidebarClosed)}
+        >
+          <ChevronRight size={18} />
+        </button>
+      </div>
+      <nav id="nodes-navigation" aria-label="Navegación principal">
+        <button
+          aria-label="Aplicaciones"
+          title="Aplicaciones"
           class:active={view === 'apps'}
           on:click={() => (view = 'apps')}
           aria-current={view === 'apps' ? 'page' : undefined}
-          ><Layers size={20} strokeWidth={1.6} />Aplicaciones</button
+          ><Layers size={20} strokeWidth={1.6} /><span class="nav-label">Aplicaciones</span></button
         ><button
+          aria-label="Servidores"
+          title="Servidores"
           class:active={view === 'servers'}
           on:click={() => (view = 'servers')}
           aria-current={view === 'servers' ? 'page' : undefined}
-          ><Server size={20} strokeWidth={1.6} />Servidores</button
+          ><Server size={20} strokeWidth={1.6} /><span class="nav-label">Servidores</span></button
         >
       </nav>
       <div class="sidebar-bottom">
