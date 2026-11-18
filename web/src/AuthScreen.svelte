@@ -1,5 +1,7 @@
 <script>
   import { ArrowRight, LockKeyhole, Eye, EyeOff } from '@lucide/svelte';
+  import BrandLogo from './BrandLogo.svelte';
+  import ThemeControl from './ThemeControl.svelte';
   export let api;
   export let state;
   export let initialError = '';
@@ -39,12 +41,13 @@
 </script>
 
 <main class="login-shell">
+  <ThemeControl placement="login" />
   <form class="login-form" on:submit={submit}>
-    <span class="wordmark">nodo<span>.</span></span>
-    <h1>{setup ? 'Crea tu PIN' : 'Entrar a Nodo'}</h1>
+    <BrandLogo />
+    <h1>{setup ? 'Crea tu PIN' : 'Entrar a Nodes'}</h1>
     <p class="muted">
       {setup
-        ? 'Elige 8 números. Tu PIN seguirá funcionando cuando reinicies Nodo.'
+        ? 'Elige 8 números. Tu PIN seguirá funcionando cuando reinicies Nodes.'
         : 'Entra con tu PIN para ver tus servidores y aplicaciones.'}
     </p>
     {#if !setup || state.setupAuthorized}
@@ -63,7 +66,7 @@
             pattern={'[0-9]{8}'}
             title="Escribe exactamente 8 números, sin espacios ni letras"
             autocomplete={setup ? 'new-password' : 'current-password'}
-            placeholder={setup ? '8 números' : 'Tu PIN de Nodo'}
+            placeholder={setup ? '8 números' : 'Tu PIN de Nodes'}
           /><button
             type="button"
             class="icon-button"
@@ -109,14 +112,14 @@
       </p>
     {:else}
       <div class="notice warning">
-        Abre el enlace privado de configuración que aparece en la consola al iniciar Nodo. Así solo
+        Abre el enlace privado de configuración que aparece en la consola al iniciar Nodes. Así solo
         quien inició el programa puede crear el PIN.
       </div>
       {#if initialError}<p class="notice error" role="alert">{initialError}</p>{/if}
     {/if}
     {#if !setup}<details class="recovery-help">
         <summary>¿Olvidaste tu PIN?</summary>
-        <p>Detén Nodo y ejecuta este comando desde la carpeta del proyecto:</p>
+        <p>Detén Nodes y ejecuta este comando desde la carpeta del proyecto:</p>
         <code>.\bin\nodo.exe -reset-password</code>
         <p>
           Abre el enlace privado que aparecerá para crear otro PIN. Tus servidores e históricos se

@@ -2,6 +2,8 @@
 
 Administrador de VPS Linux con backend Go, interfaz Svelte y SQLite. El panel se ejecuta en tu computadora, conecta tus servidores por OpenSSH y permite consultar recursos, administrar aplicaciones Docker y abrir terminales desde el navegador.
 
+La identidad **Violeta pulso** incluye logo de tres nodos, icono y nueve paletas seleccionables desde **Apariencia**. Consulta el [branding y sus archivos descargables](docs/branding/README.md).
+
 ## Instalación local
 
 Consulta la **[guía práctica para Windows y Linux](docs/INSTALACION-LOCAL.md)**: requisitos, clonación, compilación, primer PIN, conexión SSH, respaldos y solución de problemas.

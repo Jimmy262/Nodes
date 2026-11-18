@@ -101,7 +101,7 @@
       connection = { connected: false };
       repositories = [];
       notice =
-        'Token retirado de Nodo. Los workflows por push continúan en GitHub; puedes desactivarlos desde Actions.';
+        'Token retirado de Nodes. Los workflows por push continúan en GitHub; puedes desactivarlos desde Actions.';
     } catch (e) {
       error = e.message;
     } finally {
@@ -266,7 +266,7 @@
       'IP pública o dominio de la VPS, accesible desde GitHub. Los alias SSH de tu PC no funcionan aquí.',
     ],
     ['PORT', 'Puerto SSH de la VPS (normalmente 22).'],
-    ['USER', 'El mismo usuario SSH que conectaste a Nodo.'],
+    ['USER', 'El mismo usuario SSH que conectaste a Nodes.'],
     [
       'SSH_KEY',
       'Clave privada dedicada a estos despliegues, sin contraseña. Autoriza su clave pública en la VPS.',
@@ -307,7 +307,7 @@
   </header>
   <p class="small muted">
     Despliega en tus VPS con Docker Compose. Los pushes se ejecutan con GitHub Actions, incluso con
-    Nodo cerrado.
+    Nodes cerrado.
   </p>
   {#if loading}<p aria-live="polite">Cargando conexión…</p>
   {:else if !connection?.connected}
@@ -325,7 +325,7 @@
       <p class="small muted">
         Crea un token de acceso granular para los repositorios elegidos: Contents y Workflows con
         escritura, y Actions con lectura. Si la organización exige autorización, apruébala en
-        GitHub. Nodo lo cifra con protección de tu cuenta de Windows.
+        GitHub. Nodes lo cifra con protección de tu cuenta de Windows.
       </p>
       <div class="button-row">
         <button class="primary" disabled={pending}
@@ -358,7 +358,7 @@
           />{:else if job.status === 'succeeded'}<CheckCircle2 size={16} />{/if}
         {job.message}
         {#if job.status === 'running'}<p class="small">
-            Mantén Nodo abierto durante esta operación. Los despliegues automáticos posteriores se
+            Mantén Nodes abierto durante esta operación. Los despliegues automáticos posteriores se
             ejecutan en GitHub.
           </p>{/if}
       </div>{/if}
@@ -404,8 +404,8 @@
               <summary>Activar despliegue automático · secretos SSH</summary>
               <p class="small">
                 En el repositorio → Settings → Secrets and variables → Actions, añade estos cinco
-                secretos. El usuario y la VPS deben coincidir con la conexión de Nodo. Usa una clave
-                dedicada; Nodo no copia tu clave privada a GitHub.
+                secretos. El usuario y la VPS deben coincidir con la conexión de Nodes. Usa una clave
+                dedicada; Nodes no copia tu clave privada a GitHub.
               </p>
               <dl>
                 {#each secrets as [suffix, description]}<dt>
@@ -436,7 +436,7 @@
             {#if runErrors[item.id]}<p class="notice error">{runErrors[item.id]}</p>{/if}
             {#if runs[item.id]}<div class="github-runs">
                 <p class="small muted">
-                  GitHub Actions · los despliegues manuales de Nodo aparecen en Actividad.
+                  GitHub Actions · los despliegues manuales de Nodes aparecen en Actividad.
                 </p>
                 {#each runs[item.id] as run}<a
                     href={run.html_url}

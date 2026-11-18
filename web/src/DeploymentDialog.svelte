@@ -320,7 +320,7 @@
         rel="noopener noreferrer">Abrir aplicación<ArrowUpRight size={16} /></a
       >{/if}
     {#if job.status === 'running'}<p class="small muted">
-        Puedes seguir trabajando y consultar Actividad. Mantén Nodo abierto hasta que termine.
+        Puedes seguir trabajando y consultar Actividad. Mantén Nodes abierto hasta que termine.
       </p>{/if}
   {:else}
     <p class="muted small">Proyecto, enlace y variables, en un solo lugar.</p>

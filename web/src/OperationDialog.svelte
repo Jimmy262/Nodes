@@ -346,7 +346,7 @@
       <p>{job?.message}</p>
     </div>
     {#if job?.status === 'running'}<p class="small muted">
-        Puedes cerrar esta ventana y seguir el progreso en Actividad. Mantén Nodo abierto hasta que
+        Puedes cerrar esta ventana y seguir el progreso en Actividad. Mantén Nodes abierto hasta que
         termine.
       </p>{/if}
     <button class="secondary spaced" on:click={close}>Cerrar</button>

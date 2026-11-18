@@ -13,7 +13,7 @@
     observer.observe(panel);
     return () => observer.disconnect();
   });
-  const colors = ['#326A48', '#7684BA', '#C48A42', '#348B98', '#AC6880', '#797C42'];
+  const colors = Array.from({ length: 6 }, (_, index) => `var(--chart-${index + 1})`);
   $: start = now - 60 * 60 * 1000;
   $: count = servers.reduce(
     (total, server) =>

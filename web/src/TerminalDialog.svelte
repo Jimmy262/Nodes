@@ -6,6 +6,7 @@
   import '@xterm/xterm/css/xterm.css';
   import { modal } from './format.js';
   import { terminalInputFrames } from './lib/terminalInput.js';
+  import { theme, themeTokens } from './lib/themes.js';
 
   export let server;
   export let kind;
@@ -221,7 +222,16 @@
       fontSize: 14,
       fontFamily: 'Consolas, Menlo, monospace',
       scrollback: 2000,
-      theme: { background: '#111714', foreground: '#e6eee9', cursor: '#9bdfb5' },
+      theme: { background: '#140e21', foreground: '#F4F2F8', cursor: '#C7A5FF' },
+    });
+    const unsubscribeTheme = theme.subscribe((palette) => {
+      const colors = themeTokens(palette);
+      term.options.theme = {
+        background: colors['terminal-bg'],
+        foreground: colors['terminal-text'],
+        cursor: colors['terminal-cursor'],
+        selectionBackground: '#FFFFFF33',
+      };
     });
     fit = new FitAddon();
     term.loadAddon(fit);
@@ -235,6 +245,7 @@
     connect();
     const installTimer = setInterval(pollInstallation, 2000);
     return () => {
+      unsubscribeTheme();
       active = false;
       if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
       clearTimeout(retryTimer);
