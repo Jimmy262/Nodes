@@ -54,7 +54,7 @@
       if (!active) return;
       if (status.current === target || status.lastResult === `failed ${target}`) {
         if (status.current !== target && status.pending) return;
-        if (status.current !== target) error = 'La actualización falló. Consulta el registro del servicio nodes-update.';
+        if (status.current !== target) error = 'La actualización falló. Consulta el registro del actualizador en el servidor.';
         target = '';
         info = { ...info, ...status, pending: '', available: status.current !== info.latest };
       }

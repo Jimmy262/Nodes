@@ -6,8 +6,8 @@ En Linux x86-64 con systemd, ejecuta como root:
 
 ```bash
 tmp=$(mktemp)
-curl -fsSL https://github.com/Jimmy262/Nodes/releases/download/v0.1.0/install-linux.sh -o "$tmp" &&
-  bash "$tmp" --version v0.1.0
+curl -fsSL https://github.com/Jimmy262/Nodes/releases/download/v0.1.1/install-linux.sh -o "$tmp" &&
+  bash "$tmp" --version v0.1.1
 rm -f "$tmp"
 ```
 
@@ -28,10 +28,33 @@ host realiza la instalación. Los registros se consultan con
 `journalctl -u nodes-update`. El instalador se detiene si detecta la instalación
 Docker Compose de producción o un servicio nativo configurado a mano.
 
+## Habilitar actualizaciones en un Nodes con Docker Compose
+
+Si ya tienes la distribución Compose de Nodes con los servicios `app` y
+`gateway`, ejecuta como root en esa VPS. Usa la ruta absoluta de su archivo
+Compose actual.
+
+```bash
+tmp=$(mktemp)
+curl -fsSL https://github.com/Jimmy262/Nodes/releases/download/v0.1.1/install-compose-updater.sh -o "$tmp" &&
+  bash "$tmp" --version v0.1.1 --compose-file /ruta/al/compose.yaml
+rm -f "$tmp"
+```
+
+El instalador verifica el paquete, respalda el directorio de datos y recrea
+solo `app` con el nuevo binario. Si falla la comprobación de Compose, vuelve a
+la configuración anterior. Conserva el archivo Compose original en su
+carpeta, protegido y propiedad de root. Tras la primera activación,
+**Actualizar Nodes** solicita futuras versiones con passkey.
+`journalctl -u nodes-update-compose` muestra el resultado. Para operar por
+terminal usa el mismo instalador con `--version`, sin volver a indicar la ruta.
+Si necesitas recrear la app manualmente, carga también el override gestionado
+en `/opt/nodes-compose-updater/override.yaml` después del Compose original.
+
 Para publicar otra versión, construye el frontend con `npm ci && npm run build`
 y compila el binario Linux amd64 con
 `go build -trimpath -ldflags "-X admin-servidores/internal/panel.nodesVersion=vX.Y.Z" -o nodo-linux-amd64 ./cmd/panel`.
-Publica `nodo-linux-amd64`, `scripts/install-linux.sh` y la suma del binario en
+Publica `nodo-linux-amd64`, ambos instaladores y la suma del binario en
 `SHA256SUMS` en una release estable con ese mismo tag.
 
 El panel incluye dos sesiones independientes por VPS: **Codex** y **Terminal**. Se muestran dentro del navegador mediante xterm.js, WebSocket autenticado y SSH con PTY. Ambas usan `tmux -L nodo-web` en la VPS. Cerrar la vista, cambiar de red o reiniciar Nodo desconecta el cliente; el proceso remoto continúa. Reiniciar la VPS o terminar el proceso dentro de tmux finaliza esa sesión. Volver a pulsar el botón crea o retoma la sesión del mismo tipo.
