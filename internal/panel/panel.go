@@ -159,6 +159,7 @@ func (a *App) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("DELETE /api/github/connection", a.disconnectGithub)
 	mux.HandleFunc("GET /api/github/repositories", a.githubRepositories)
 	mux.HandleFunc("GET /api/github/repository", a.githubRepositoryAccess)
+	mux.HandleFunc("POST /api/github/deploy/inspect", a.limitPreparation(a.inspectGithubDeployment))
 	mux.HandleFunc("POST /api/servers/{id}/github/plan", a.limitPreparation(a.githubPlan))
 	mux.HandleFunc("GET /api/github/deployments", a.githubDeployments)
 	mux.HandleFunc("GET /api/github/deployments/{deployment}/runs", a.githubRuns)

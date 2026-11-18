@@ -62,13 +62,61 @@
     options = null,
     optionsKey = '',
     optionsVersion = 0;
+  let inspection = null,
+    inspectionError = '',
+    inspectionLoading = false,
+    inspectionTimer,
+    inspectionRequest,
+    inspectionVersion = 0;
   let plan = null,
     job = null,
     jobId = '',
     alive = false,
     polling = false;
   $: if (alive && creating && String(serverId) !== optionsKey) loadOptions();
-  $: canReview = !!repository && !!serverId && !pending && !checkingRepository && !optionsLoading;
+  $: if (alive && creating) scheduleInspection(repository, branch, buildPath, composeFile);
+  $: selectedFile = composeFile.trim().replace(/^\.\//, '');
+  $: alternatives = inspection?.files.filter((item) => !item.problem) || [];
+  $: suggested = !selectedFile && inspection?.automatic.problem && alternatives.length === 1
+    ? alternatives[0]
+    : null;
+  $: detected = selectedFile
+    ? inspection?.files.find((item) => item.file === selectedFile)
+    : suggested || inspection?.automatic;
+  $: canReview = !!repository && !!serverId && !pending && !checkingRepository &&
+    !optionsLoading && !inspectionLoading && !detected?.problem;
+
+  function scheduleInspection(repo, ref, folder, file) {
+    clearTimeout(inspectionTimer);
+    inspectionRequest?.abort();
+    const version = ++inspectionVersion;
+    inspection = null;
+    inspectionError = '';
+    inspectionLoading = !!repo && !!ref.trim() && !!folder.trim();
+    if (!inspectionLoading) return;
+    inspectionTimer = setTimeout(async () => {
+      const controller = new AbortController();
+      inspectionRequest = controller;
+      try {
+        const result = await api('/github/deploy/inspect', {
+          method: 'POST',
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(35000)]),
+          body: JSON.stringify({
+            repository: repo,
+            branch: ref.trim(),
+            buildPath: folder.trim(),
+            composeFile: file.trim().replace(/^\.\//, ''),
+          }),
+        });
+        if (version === inspectionVersion) inspection = result;
+      } catch (err) {
+        if (version === inspectionVersion && !controller.signal.aborted)
+          inspectionError = err.message;
+      } finally {
+        if (version === inspectionVersion) inspectionLoading = false;
+      }
+    }, 350);
+  }
 
   async function load() {
     loading = true;
@@ -256,9 +304,9 @@
         body: JSON.stringify({
           name,
           repository,
-          branch,
-          buildPath,
-          composeFile: composeFile.trim(),
+          branch: branch.trim(),
+          buildPath: buildPath.trim(),
+          composeFile: selectedFile || suggested?.file || '',
           service,
           port: Number(port),
           hostPort: Number(hostPort),
@@ -409,6 +457,9 @@
       token = '';
       environment = [];
       clearInterval(timer);
+      clearTimeout(inspectionTimer);
+      inspectionVersion++;
+      inspectionRequest?.abort();
       window.removeEventListener('focus', refreshOnReturn);
       document.removeEventListener('visibilitychange', refreshOnReturn);
     };
@@ -614,6 +665,57 @@
                 >{/each}</select
             ></label
           >
+          <section class="gh-project-config" aria-labelledby="github-project-title">
+            <div class="gh-field-heading">
+              <h3 id="github-project-title">Configuración del proyecto</h3>
+              <small>{branch} · {buildPath === '.' ? 'Raíz' : buildPath}</small>
+            </div>
+            {#if !repository}
+              <p class="gh-field-hint">Elige un repositorio para detectar su configuración.</p>
+            {:else}
+              <label class="field">
+                Archivo Compose
+                <input
+                  bind:value={composeFile}
+                  list="github-compose-files"
+                  maxlength="120"
+                  placeholder={detected?.file || (detected?.kind === 'dockerfile' ? 'Dockerfile detectado' : 'Detección automática')}
+                />
+              </label>
+              <datalist id="github-compose-files">
+                {#each alternatives as item}<option value={item.file}></option>{/each}
+              </datalist>
+              {#if inspectionLoading}
+                <p class="gh-field-hint" role="status">Buscando archivos de despliegue…</p>
+              {:else if inspectionError}
+                <p class="gh-field-hint" role="status">Puedes revisar el despliegue manualmente. {inspectionError}</p>
+              {:else if detected?.problem}
+                <div class="notice warning" role="status">
+                  <p>{detected.problem}</p>
+                  {#if alternatives.length > 0}
+                    <p>Elige un archivo compatible.</p>
+                    <div class="button-row">
+                      {#each alternatives as item}
+                        <button type="button" class="secondary" on:click={() => (composeFile = item.file)}>{item.file}</button>
+                      {/each}
+                    </div>
+                  {:else}
+                    <p>Indica otro archivo del repositorio o añade un Compose autónomo a esta rama.</p>
+                  {/if}
+                </div>
+              {:else if detected}
+                <p class="gh-field-hint" role="status">
+                  {detected.kind === 'dockerfile' ? 'Dockerfile detectado.' : `Se usará ${detected.file}.`}
+                  {#if service || detected.service} Servicio {service || detected.service}.{/if}
+                  {#if port || detected.port} Puerto interno {port || detected.port}.{/if}
+                  {#if (!service && !detected.service) || (!port && !detected.port)}
+                    <button type="button" class="text-button" on:click={() => (runtimeOpen = true)}>Elegir servicio y puerto</button>
+                  {/if}
+                </p>
+                {#if suggested}<p class="notice warning">{inspection.automatic.problem}</p>{/if}
+              {/if}
+            {/if}
+          </section>
           <section class="gh-access">
             <div class="gh-field-heading">
               <span>Acceso público</span>{#if optionsLoading}<small role="status"
@@ -640,7 +742,9 @@
               >
               <p class="gh-field-hint">
                 DNS A → {options?.publicIp || 'IP de la VPS'}
-              </p>{:else if access === 'port'}<label class="field"
+              </p>{:else if access === 'port' && detected?.kind === 'compose'}<p class="gh-field-hint">
+                El acceso usa los puertos publicados en {detected.file}.
+              </p>{:else if access === 'port' && !inspectionLoading && !detected?.problem}<label class="field"
                 >Puerto del servidor<input
                   type="number"
                   bind:value={hostPort}
@@ -651,7 +755,7 @@
               >
               <p class="gh-field-hint">
                 Se usa con Dockerfile. Compose conserva los puertos de su archivo.
-              </p>{:else}<p class="gh-field-hint">Se generará un enlace para la aplicación.</p>{/if}
+              </p>{:else if access !== 'port'}<p class="gh-field-hint">Se generará un enlace para la aplicación.</p>{/if}
             {#if access !== 'port'}<label class="deploy-checkbox"
                 ><input
                   type="checkbox"
@@ -720,14 +824,6 @@
                   /></label
                 >
               </div>
-              <label class="field">
-                Archivo Compose
-                <input bind:value={composeFile} maxlength="120" placeholder="Detección automática" />
-              </label>
-              <p class="gh-field-hint">
-                Si el repositorio tiene varias configuraciones, indica el nombre del archivo de
-                despliegue en la carpeta elegida. Usa un Compose completo con redes propias del proyecto.
-              </p>
             </div>
           </details>
           <details class="gh-form-options" bind:open={runtimeOpen}>

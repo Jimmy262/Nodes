@@ -6,8 +6,8 @@ En Linux x86-64 con systemd, ejecuta como root:
 
 ```bash
 tmp=$(mktemp)
-curl -fsSL https://github.com/Jimmy262/Nodes/releases/download/v0.1.1/install-linux.sh -o "$tmp" &&
-  bash "$tmp" --version v0.1.1
+curl -fsSL https://github.com/Jimmy262/Nodes/releases/download/v0.1.2/install-linux.sh -o "$tmp" &&
+  bash "$tmp" --version v0.1.2
 rm -f "$tmp"
 ```
 
@@ -36,8 +36,8 @@ Compose actual.
 
 ```bash
 tmp=$(mktemp)
-curl -fsSL https://github.com/Jimmy262/Nodes/releases/download/v0.1.1/install-compose-updater.sh -o "$tmp" &&
-  bash "$tmp" --version v0.1.1 --compose-file /ruta/al/compose.yaml
+curl -fsSL https://github.com/Jimmy262/Nodes/releases/download/v0.1.2/install-compose-updater.sh -o "$tmp" &&
+  bash "$tmp" --version v0.1.2 --compose-file /ruta/al/compose.yaml
 rm -f "$tmp"
 ```
 

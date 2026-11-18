@@ -262,6 +262,14 @@ func (a *App) githubRepositoryAccess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) githubArchive(ctx context.Context, token []byte, repo, branch, buildPath, composeFile string) (*zipProject, error) {
+	data, err := a.githubProjectArchive(ctx, token, repo, branch, buildPath)
+	if err != nil {
+		return nil, err
+	}
+	return inspectZipWithCompose(data, 8080, 80, composeFile)
+}
+
+func (a *App) githubProjectArchive(ctx context.Context, token []byte, repo, branch, buildPath string) ([]byte, error) {
 	var commit struct {
 		SHA string `json:"sha"`
 	}
@@ -295,11 +303,14 @@ func (a *App) githubArchive(ctx context.Context, token []byte, repo, branch, bui
 	if e != nil || len(data) > maxZipSize {
 		return nil, errors.New("El repositorio supera 64 MiB o no se pudo descargar")
 	}
-	data, e = githubSubdirectory(data, buildPath)
-	if e != nil {
-		return nil, e
-	}
-	return inspectZipWithCompose(data, 8080, 80, composeFile)
+	return githubSubdirectory(data, buildPath)
+}
+
+func validGithubProject(repo, branch, folder string) bool {
+	return githubRepositoryPattern.MatchString(repo) && githubBranchPattern.MatchString(branch) &&
+		!strings.Contains(branch, "..") && !strings.Contains(branch, "//") &&
+		!strings.HasSuffix(branch, "/") && !strings.HasSuffix(branch, ".lock") &&
+		relativeProjectPath(folder)
 }
 func githubSubdirectory(data []byte, subdir string) ([]byte, error) {
 	z, e := zip.NewReader(bytes.NewReader(data), int64(len(data)))
@@ -382,7 +393,7 @@ func (a *App) githubPlan(w http.ResponseWriter, r *http.Request) {
 	if in.BuildPath == "" {
 		in.BuildPath = "."
 	}
-	if !projectPattern.MatchString(in.Name) || !githubRepositoryPattern.MatchString(in.Repository) || !githubBranchPattern.MatchString(in.Branch) || strings.Contains(in.Branch, "..") || strings.Contains(in.Branch, "//") || strings.HasSuffix(in.Branch, "/") || strings.HasSuffix(in.Branch, ".lock") || !relativeProjectPath(in.BuildPath) {
+	if !projectPattern.MatchString(in.Name) || !validGithubProject(in.Repository, in.Branch, in.BuildPath) {
 		fail(w, 400, "Revisa el nombre, repositorio, rama y carpeta del proyecto")
 		return
 	}

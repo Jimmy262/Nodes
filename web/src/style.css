@@ -2536,6 +2536,13 @@ dd {
 .gh-account-settings > div { position: absolute; right: 0; z-index: 5; background: var(--white); border: 1px solid var(--line); border-radius: 6px; padding: 6px; width: 170px; }
 .gh-account-settings button { width: 100%; justify-content: flex-start; min-height: 40px; padding: 8px; }
 .gh-deploy-form fieldset { padding: 0; margin: 0; border: 0; min-width: 0; display: grid; gap: 16px; }
+.gh-project-config { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
+.gh-project-config h3 { font-size: 13px; margin: 0; }
+.gh-project-config .gh-field-heading small { text-align: right; overflow-wrap: anywhere; }
+.gh-project-config .notice { margin: 8px 0 0; overflow-wrap: anywhere; }
+.gh-project-config .notice p { margin: 0 0 5px; }
+.gh-project-config .notice p:last-child { margin-bottom: 0; }
+.gh-project-config .button-row { flex-wrap: wrap; }
 .github-flow .field { margin: 0; gap: 6px; }
 .github-flow .form-pair { gap: 12px; margin: 0; }
 .gh-field-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
