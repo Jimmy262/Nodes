@@ -16,7 +16,6 @@
   import GithubPushSetup from './GithubPushSetup.svelte';
   export let servers;
   export let sourceId = null;
-  export let updatesOnly = false;
   export let api;
   export let onClose;
   export let onStarted;
@@ -81,8 +80,8 @@
       if (!alive) return;
       connection = state;
       deployments = items;
-      if (!updatesOnly && state.connected && !items.length) creating = true;
-      if (!updatesOnly && state.connected) await loadRepositories();
+      if (state.connected && !items.length) creating = true;
+      if (state.connected) await loadRepositories();
     } catch (e) {
       if (alive) error = e.message;
     } finally {
@@ -168,10 +167,10 @@
       repositories = [];
       repository = '';
       composeFile = '';
-      if (!updatesOnly && !deployments.length) creating = true;
+      if (!deployments.length) creating = true;
       updatingToken = false;
       token = '';
-      if (!updatesOnly) await loadRepositories();
+      await loadRepositories();
     } catch (e) {
       error = e.message;
     } finally {
@@ -431,7 +430,7 @@
             : 'Revisar despliegue'
           : creating
             ? 'Desplegar desde GitHub'
-            : updatesOnly ? 'Actualizaciones de GitHub' : 'GitHub'}
+            : 'GitHub'}
       </h2>
     </div>
     <button class="icon-button" disabled={pending} on:click={close} aria-label="Cerrar GitHub"
@@ -560,7 +559,7 @@
           </div>
           <div class="button-row">
             <button class="secondary" disabled={pending} on:click={() => deploy(item)}
-              >{updatesOnly ? 'Revisar actualización' : 'Desplegar ahora'}</button
+              >Desplegar ahora</button
             ><button class="text-button" disabled={pending} on:click={() => refreshRuns(item)}
               ><RefreshCw size={14} />Ver actividad</button
             >
@@ -579,20 +578,18 @@
                   Aún no hay ejecuciones. Completa la configuración del push y envía un commit.
                 </p>{/each}
             </div>{/if}
-          {#if !updatesOnly}<GithubPushSetup
+          <GithubPushSetup
             deployment={item}
             server={servers.find((server) => server.id === item.serverId)}
             open={item.id === preparedId}
             {pending}
             onPublish={publish}
             onActivate={activatePush}
-          />{/if}
+          />
         </article>
       {/each}
       {#if !deployments.length}<p class="small muted">
-          {updatesOnly
-            ? 'Aún no hay aplicaciones vinculadas a GitHub. Usa Nueva aplicación para preparar la primera.'
-            : 'Conecta un repositorio para tu primera aplicación.'}
+          Conecta un repositorio para tu primera aplicación.
         </p>{/if}
       {#if repositoriesError}<p class="notice error" role="alert">{repositoriesError}</p>{/if}
     {/if}
