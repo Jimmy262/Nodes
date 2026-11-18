@@ -1,36 +1,23 @@
 <script>
-  import { ArrowRight, LockKeyhole, Eye, EyeOff } from '@lucide/svelte';
+  import { ArrowRight, Fingerprint, ShieldCheck } from '@lucide/svelte';
   import BrandLogo from './BrandLogo.svelte';
   import ThemeControl from './ThemeControl.svelte';
+  import { passkeysSupported, usePasskey } from './lib/passkeys.js';
   export let api;
   export let state;
   export let initialError = '';
   export let onAuthenticated;
-  let password = '',
-    confirmation = '',
-    remember = true,
-    visible = false,
+  let remember = true,
     busy = false,
     error = '';
+  const supported = passkeysSupported();
   $: setup = !state.configured;
   async function submit(event) {
     event.preventDefault();
     error = '';
-    if (setup && password !== confirmation) {
-      error = 'Los PIN no coinciden';
-      return;
-    }
     busy = true;
     try {
-      await api(setup ? '/auth/setup' : '/login', {
-        method: 'POST',
-        body: JSON.stringify(
-          setup ? { password, confirmPassword: confirmation, remember } : { password, remember },
-        ),
-      });
-      password = '';
-      confirmation = '';
-      visible = false;
+      await usePasskey(api, { register: setup, remember });
       await onAuthenticated();
     } catch (e) {
       error = e.message;
@@ -44,87 +31,61 @@
   <ThemeControl placement="login" />
   <form class="login-form" on:submit={submit}>
     <BrandLogo />
-    <h1>{setup ? 'Crea tu PIN' : 'Entrar a Nodes'}</h1>
+    <h1>{setup ? 'Crea tu acceso' : 'Entrar a Nodes'}</h1>
     <p class="muted">
       {setup
-        ? 'Elige 8 números. Tu PIN seguirá funcionando cuando reinicies Nodes.'
-        : 'Entra con tu PIN para ver tus servidores y aplicaciones.'}
+        ? 'Guarda una passkey para entrar con tu huella, rostro o el desbloqueo de tu dispositivo.'
+        : 'Usa tu passkey para acceder a tus servidores y aplicaciones.'}
     </p>
-    {#if !setup || state.setupAuthorized}
-      <label class="field" for="nodo-password"
-        >{setup ? 'Crea tu PIN' : 'PIN'}
-        <span class="password-field"
-          ><input
-            id="nodo-password"
-            name="password"
-            type={visible ? 'text' : 'password'}
-            bind:value={password}
-            required
-            minlength="8"
-            maxlength="8"
-            inputmode="numeric"
-            pattern={'[0-9]{8}'}
-            title="Escribe exactamente 8 números, sin espacios ni letras"
-            autocomplete={setup ? 'new-password' : 'current-password'}
-            placeholder={setup ? '8 números' : 'Tu PIN de Nodes'}
-          /><button
-            type="button"
-            class="icon-button"
-            on:click={() => (visible = !visible)}
-            aria-label={visible ? 'Ocultar PIN' : 'Mostrar PIN'}
-            >{#if visible}<EyeOff size={17} />{:else}<Eye size={17} />{/if}</button
+    {#if !supported || state.passkeyAvailable === false}
+      <p class="notice warning" role="status">
+        Necesitas un navegador compatible y el dominio HTTPS de Nodes. En tu computadora, abre
+        <a href={`http://localhost:${location.port || '8080'}`}>Nodes en localhost</a>. Para el
+        primer acceso, usa el enlace privado de la consola con ese mismo dominio.
+      </p>
+    {:else if !setup || state.setupAuthorized}
+      <label class="remember-option">
+        <input type="checkbox" bind:checked={remember} disabled={busy} />
+        <span
+          >Recordar este navegador durante 30 días<small
+            >Solo en tus dispositivos de confianza.</small
           ></span
         >
       </label>
-      {#if setup}<label class="field" for="nodo-confirm"
-          >Repite tu PIN<input
-            id="nodo-confirm"
-            name="confirmPassword"
-            type="password"
-            bind:value={confirmation}
-            required
-            minlength="8"
-            maxlength="8"
-            inputmode="numeric"
-            pattern={'[0-9]{8}'}
-            title="Repite los mismos 8 números"
-            autocomplete="new-password"
-            placeholder="Escríbelo una vez más"
-          /></label
-        >{/if}
-      <label class="remember-option"
-        ><input type="checkbox" bind:checked={remember} /><span
-          >Recordarme durante 30 días<small
-            >En este navegador. Úsalo en tu equipo de confianza.</small
-          ></span
-        ></label
-      >
-      {#if error || initialError}<p class="notice error" role="alert">
-          {error || initialError}
-        </p>{/if}
-      <button class="primary" disabled={busy}
-        >{busy ? 'Comprobando…' : setup ? 'Guardar PIN y entrar' : 'Entrar al panel'}<ArrowRight
-          size={17}
-        /></button
-      >
+      <button class="primary" disabled={busy}>
+        <Fingerprint size={20} />{busy
+          ? 'Esperando tu dispositivo…'
+          : setup
+            ? 'Crear passkey y entrar'
+            : 'Entrar con passkey'}<ArrowRight size={17} />
+      </button>
       <p class="small muted auth-local">
-        <LockKeyhole size={13} /> Acceso local · protección de Windows
+        <ShieldCheck size={14} /> Tu dispositivo verifica tu identidad.
+      </p>
+      <p class="small muted">
+        También puedes usar una passkey de tu celular o una llave de seguridad.
       </p>
     {:else}
-      <div class="notice warning">
-        Abre el enlace privado de configuración que aparece en la consola al iniciar Nodes. Así solo
-        quien inició el programa puede crear el PIN.
-      </div>
-      {#if initialError}<p class="notice error" role="alert">{initialError}</p>{/if}
+      <p class="notice warning">
+        Abre el enlace privado que aparece en la consola al iniciar Nodes para registrar tu primera
+        passkey. Caduca a los 15 minutos del arranque y solo se puede abrir una vez.
+      </p>
     {/if}
-    {#if !setup}<details class="recovery-help">
-        <summary>¿Olvidaste tu PIN?</summary>
-        <p>Detén Nodes y ejecuta este comando desde la carpeta del proyecto:</p>
-        <code>.\bin\nodo.exe -reset-password</code>
+    {#if error || initialError}<p class="notice error" role="alert">{error || initialError}</p>{/if}
+    {#if !setup}
+      <details class="recovery-help">
+        <summary>¿No tienes acceso a tu passkey?</summary>
+        <p>Prueba otra passkey registrada o el dispositivo donde la guardaste.</p>
         <p>
-          Abre el enlace privado que aparecerá para crear otro PIN. Tus servidores e históricos se
-          conservan.
+          Si perdiste todas, detén Nodes y ejecuta su binario en el servidor con <code
+            >-reset-access -data ruta/a/panel.db</code
+          >, usando la misma base de datos y configuración de inicio.
         </p>
-      </details>{/if}
+        <p>
+          El comando revoca las passkeys y sesiones, conserva tus servidores y genera un enlace
+          privado para registrar un nuevo acceso.
+        </p>
+      </details>
+    {/if}
   </form>
 </main>

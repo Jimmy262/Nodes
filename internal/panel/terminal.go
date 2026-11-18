@@ -65,8 +65,13 @@ func startSSHPTY(parent context.Context, s Server, command string) (terminalBack
 }
 
 type terminalSession struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Directory string `json:"directory,omitempty"`
+}
+
+func validTerminalKind(kind string) bool {
+	return kind == "shell" || kind == "codex" || kind == "claude"
 }
 
 var terminalIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -82,10 +87,11 @@ func (a *App) prepareTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Kind string `json:"kind"`
+		Kind      string `json:"kind"`
+		Directory string `json:"directory"`
 	}
-	if decode(w, r, &input) != nil || (input.Kind != "codex" && input.Kind != "shell") {
-		fail(w, 400, "Elige Codex o Terminal")
+	if decode(w, r, &input) != nil || !validTerminalKind(input.Kind) || !validTerminalDirectory(input.Directory) {
+		fail(w, 400, "Elige Codex, Claude o Terminal y una carpeta válida")
 		return
 	}
 	// Availability checks never create a shell or start Codex.
@@ -98,27 +104,52 @@ func (a *App) prepareTerminal(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{"requirements": options})
 		return
 	}
+	if input.Directory != "" {
+		folder, err := a.readTerminalDirectory(r.Context(), s, input.Directory)
+		if err != nil {
+			fail(w, 422, err.Error())
+			return
+		}
+		input.Directory = folder.Path
+	}
 	id, err := randomToken()
 	if err != nil {
 		fail(w, 500, "No se pudo preparar la sesión")
 		return
 	}
-	_, err = a.db.Exec(`INSERT INTO terminal_sessions VALUES(?,?,?,?,?) ON CONFLICT(server_id,kind) DO UPDATE SET id=CASE WHEN connection_hash=excluded.connection_hash THEN id ELSE excluded.id END,connection_hash=excluded.connection_hash`, id, s.ID, input.Kind, connectionHash(s), time.Now().Unix())
+	if input.Directory == "" {
+		_, err = a.db.Exec(`INSERT INTO terminal_sessions VALUES(?,?,?,?,?) ON CONFLICT(server_id,kind) DO UPDATE SET id=CASE WHEN connection_hash=excluded.connection_hash THEN id ELSE excluded.id END,connection_hash=excluded.connection_hash`, id, s.ID, input.Kind, connectionHash(s), time.Now().Unix())
+	} else {
+		_, err = a.db.Exec(`INSERT INTO terminal_workspace_sessions VALUES(?,?,?,?,?,?) ON CONFLICT(server_id,kind,directory) DO UPDATE SET id=CASE WHEN connection_hash=excluded.connection_hash THEN id ELSE excluded.id END,connection_hash=excluded.connection_hash`, id, s.ID, input.Kind, connectionHash(s), input.Directory, time.Now().Unix())
+	}
 	if err != nil {
 		fail(w, 500, "No se pudo guardar la sesión")
 		return
 	}
-	if err = a.db.QueryRow("SELECT id FROM terminal_sessions WHERE server_id=? AND kind=?", s.ID, input.Kind).Scan(&id); err != nil {
+	if input.Directory == "" {
+		err = a.db.QueryRow("SELECT id FROM terminal_sessions WHERE server_id=? AND kind=?", s.ID, input.Kind).Scan(&id)
+	} else {
+		err = a.db.QueryRow("SELECT id FROM terminal_workspace_sessions WHERE server_id=? AND kind=? AND directory=?", s.ID, input.Kind, input.Directory).Scan(&id)
+	}
+	if err != nil {
 		fail(w, 500, "No se pudo leer la sesión")
 		return
 	}
-	reply(w, 200, terminalSession{id, input.Kind})
+	reply(w, 200, terminalSession{id, input.Kind, input.Directory})
 }
 
-func remoteTerminalCommand(id, kind string) string {
+func remoteTerminalCommand(id, kind string, directories ...string) string {
+	directory := ""
+	if len(directories) > 0 {
+		directory = directories[0]
+	}
 	command := `exec "${SHELL:-/bin/sh}" -l`
 	if kind == "codex" {
-		command = `exec "${SHELL:-/bin/sh}" -lc ` + shellQuote(codexRemoteScript)
+		command = `exec "${SHELL:-/bin/sh}" -lc ` + shellQuote(agentRemoteScript(kind, directory))
+	} else if kind == "claude" {
+		command = `exec "${SHELL:-/bin/sh}" -lc ` + shellQuote(agentRemoteScript(kind, directory))
+	} else if directory != "" {
+		command = `cd -- ` + shellQuote(directory) + ` || exit 1; ` + command
 	}
 	// A separate tmux socket isolates these sessions from the user's other tmux
 	// sessions. Closing SSH detaches the client without terminating the pane.
@@ -160,8 +191,7 @@ func (a *App) terminalAuthorized(r *http.Request, id, binding string) bool {
 	if err != nil || connectionHash(server) != binding {
 		return false
 	}
-	var stored string
-	err = a.db.QueryRow("SELECT connection_hash FROM terminal_sessions WHERE id=? AND server_id=?", id, server.ID).Scan(&stored)
+	_, stored, _, err := a.storedTerminal(id, server.ID)
 	return err == nil && stored == binding
 }
 
@@ -181,13 +211,12 @@ func (a *App) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("terminal")
-	var kind, binding string
 	if !terminalIDPattern.MatchString(id) {
 		fail(w, 404, "Sesión no encontrada")
 		return
 	}
-	err = a.db.QueryRow("SELECT kind,connection_hash FROM terminal_sessions WHERE id=? AND server_id=?", id, s.ID).Scan(&kind, &binding)
-	if err != nil || binding != connectionHash(s) || (kind != "shell" && kind != "codex") {
+	kind, binding, directory, err := a.storedTerminal(id, s.ID)
+	if err != nil || binding != connectionHash(s) || !validTerminalKind(kind) {
 		fail(w, 404, "Sesión no encontrada")
 		return
 	}
@@ -210,7 +239,7 @@ func (a *App) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	if start == nil {
 		start = startSSHPTY
 	}
-	tty, err := start(ctx, s, remoteTerminalCommand(id, kind))
+	tty, err := start(ctx, s, remoteTerminalCommand(id, kind, directory))
 	if err != nil {
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(1011, "No se pudo iniciar SSH"), time.Now().Add(time.Second))
 		return

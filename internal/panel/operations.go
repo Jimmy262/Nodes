@@ -201,12 +201,15 @@ func (a *App) rename(w http.ResponseWriter, r *http.Request) {
 func (a *App) serverByID(id int64) (Server, error) {
 	var s Server
 	err := a.db.QueryRow("SELECT id,name,host,port,user,identity FROM servers WHERE id=?", id).Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.User, &s.Identity)
+	if err == nil {
+		err = a.loadManagedSSH(&s)
+	}
 	return s, err
 }
 
 func (a *App) sameConnection(expected Server) bool {
 	current, err := a.serverByID(expected.ID)
-	return err == nil && current.Host == expected.Host && current.Port == expected.Port && current.User == expected.User && current.Identity == expected.Identity
+	return err == nil && current.Host == expected.Host && current.Port == expected.Port && current.User == expected.User && current.Identity == expected.Identity && current.sshKeyID == expected.sshKeyID
 }
 func (a *App) containerPlan(w http.ResponseWriter, r *http.Request) {
 	s, e := a.server(r)
@@ -328,9 +331,14 @@ func (a *App) executeOperation(w http.ResponseWriter, r *http.Request) {
 func successMessage(p *operationPlan) string {
 	switch p.Kind {
 	case "terminal-install":
-		return "Requisito instalado y comprobado. Puedes volver a abrir Codex o Terminal."
+		return "Requisito instalado y comprobado. Puedes volver a abrir Codex, Claude o Terminal."
 	case "github-setup":
+		if p.github != nil && p.github.automaticPush {
+			return "Despliegue automático preparado: secretos configurados y workflow publicado. Los próximos pushes desplegarán aunque Nodes esté cerrado."
+		}
 		return "Conexión preparada y workflow publicado. Configura los secretos SSH en GitHub y pulsa Desplegar en la sección GitHub."
+	case "github-push":
+		return "Secretos SSH configurados y workflow publicado. Vuelve a ejecutar el workflow fallido o haz push a la rama configurada para desplegar automáticamente."
 	case "github-deploy":
 		return "Commit desplegado y comprobado por Docker Compose. Consulta GitHub para los despliegues automáticos."
 	case "configure":
@@ -430,6 +438,9 @@ func (a *App) runOperation(ctx context.Context, p *operationPlan) error {
 	}
 	if p.Kind == "github-setup" {
 		return a.runGithubSetup(ctx, p)
+	}
+	if p.Kind == "github-push" {
+		return a.runGithubPush(ctx, p)
 	}
 	if p.Kind == "github-deploy" {
 		return a.runGithubDeploy(ctx, p)

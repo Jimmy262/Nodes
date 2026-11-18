@@ -29,7 +29,7 @@ git clone https://github.com/Jimmy262/Nodes.git
 cd Nodes
 ```
 
-Ejecuta los comandos siguientes desde esa carpeta. La instalación nueva empieza vacía: el repositorio no contiene servidores, sesiones, PIN ni claves privadas.
+Ejecuta los comandos siguientes desde esa carpeta. La instalación nueva empieza vacía: el repositorio no contiene servidores, sesiones, passkeys ni claves privadas.
 
 ## 3. Windows: compilar e iniciar
 
@@ -58,9 +58,9 @@ No necesitas definir `NODO_MASTER_KEY` en Windows: la aplicación usa DPAPI de l
 
 ## 4. Primer acceso
 
-1. Abre el enlace privado `http://127.0.0.1:8080/#setup=...` que imprime la consola. El valor se genera en cada arranque sin PIN configurado; no lo compartas ni publiques capturas de él.
-2. Crea tu PIN de **8 números**. El panel rechaza secuencias comunes y números repetidos.
-3. En los siguientes accesos abre `http://127.0.0.1:8080` e introduce el PIN. «Recordarme» conserva la sesión durante 30 días.
+1. Abre el enlace privado `http://localhost:8080/#setup=...` que imprime la consola. El valor se genera en cada arranque sin acceso configurado; no lo compartas ni publiques capturas de él.
+2. Pulsa **Crear passkey y entrar** y confirma con tu huella, rostro, Windows Hello o una llave de seguridad.
+3. En los siguientes accesos abre `http://localhost:8080` y pulsa **Entrar con passkey**. «Recordarme» conserva la sesión durante 30 días.
 4. Mantén la terminal abierta mientras lo usas. Detén el programa con **Ctrl+C**.
 
 Para volver a iniciar basta ejecutar el binario desde la carpeta del proyecto. Para otro puerto usa `-port 8081` y abre la dirección correspondiente. Usa siempre el mismo archivo `-data`; cambiar de carpeta sin una ruta absoluta puede abrir una base nueva.
@@ -109,14 +109,14 @@ export NODO_MASTER_KEY="$(cat "$HOME/.config/nodo/master-key")"
 ./bin/nodo -port 8080 -data ./data/panel.db
 ```
 
-Abre el enlace privado de la consola y configura el PIN. Guarda una copia privada de la clave: cambiarla o perderla impide descifrar las credenciales existentes. No transfieras secretos cifrados por DPAPI de Windows esperando abrirlos con esta clave. Para servicio systemd o acceso por HTTPS consulta [la guía de alojamiento](../deploy/README.md).
+Abre el enlace privado de la consola y registra tu passkey. Guarda una copia privada de la clave: cambiarla o perderla impide descifrar las credenciales existentes. No transfieras secretos cifrados por DPAPI de Windows esperando abrirlos con esta clave. Para servicio systemd o acceso por HTTPS consulta [la guía de alojamiento](../deploy/README.md).
 
 ## 7. Datos, respaldos y actualizaciones
 
 - `data/` contiene SQLite, inventario, históricos y credenciales cifradas. Es privado y está excluido de Git junto con claves, `.env`, binarios y evidencias locales.
 - Para respaldar, detén Nodo y copia `data/` a un lugar privado. En Windows necesitas la misma identidad DPAPI para abrir los secretos; una copia SQLite por sí sola no los hace portátiles. En Linux respalda la clave maestra por separado.
 - Para actualizar: detén Nodo, respalda los datos, ejecuta `git pull --ff-only` y vuelve a compilar con los comandos de tu plataforma. Conserva el mismo archivo de datos y la clave maestra de Linux.
-- Olvido de PIN: con Nodo detenido, ejecuta el binario con `-reset-password -data data/panel.db`. En Linux, carga antes la clave maestra. El comando conserva el inventario, invalida sesiones y genera un enlace para crear otro PIN.
+- Pérdida de todas las passkeys: con Nodo detenido, ejecuta el binario con `-reset-access -data data/panel.db`. En Linux, carga antes la clave maestra. El comando conserva el inventario, revoca passkeys y sesiones y genera un enlace para registrar una nueva passkey.
 
 ## 8. Desarrollo
 
@@ -141,3 +141,13 @@ Abre `http://127.0.0.1:5173` e inicia sesión también en ese puerto. Vite reenv
 | No aparece la interfaz al compilar Go | Ejecuta `npm run build` antes de `go build`. |
 
 El acceso local escucha en `127.0.0.1`; no necesita abrir puertos en el router. Para entrar desde otro equipo o celular usa HTTPS y la configuración de [alojamiento](../deploy/README.md).
+
+
+El enlace para registrar la primera passkey caduca a los 15 minutos del arranque y solo puede canjearse una vez. Al abrirlo se autoriza únicamente ese navegador, sin ampliar el plazo. Completa el registro antes de la caducidad; si el enlace caduca o lo abriste en otro navegador, reinicia Nodes para emitir uno nuevo. Con el acceso ya configurado, reiniciar no permite registrar otra passkey sin autenticarse.
+
+
+## Alta automática de nuevos servidores
+
+En **Conectar servidor**, indica IP o dominio, usuario y puerto. Verifica la huella con una fuente de confianza y usa la contraseña SSH actual una sola vez para instalar una clave Ed25519 dedicada. Nodes conserva las claves autorizadas existentes y verifica el acceso nuevo antes de guardar el servidor. La contraseña no se almacena y el formulario no revela claves. Si la cuenta solo permite claves, utiliza la opción de acceso SSH ya configurado.
+
+Las nuevas claves se guardan cifradas en la base; dependen de DPAPI en Windows o de la clave maestra en Linux. Los archivos que necesita OpenSSH son temporales y privados; el contenedor de producción usa tmpfs. La carpeta SSH existente puede seguir montada en solo lectura. Respaldar únicamente SQLite sin la protección original no basta para recuperar esas claves en otro equipo. Eliminar un servidor de Nodes no revoca automáticamente su autorización en el servidor remoto.

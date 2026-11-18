@@ -10,7 +10,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const protectedHashPrefix = "nodo-dpapi-v1:"
 
 // DPAPI's default scope is the current Windows user, never LOCAL_MACHINE.
 func protectSecret(secret []byte) ([]byte, error) {

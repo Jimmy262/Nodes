@@ -21,7 +21,7 @@ import (
 func main() {
 	port := flag.Int("port", 8080, "Puerto local")
 	data := flag.String("data", "data/panel.db", "Archivo SQLite")
-	resetPassword := flag.Bool("reset-password", false, "Restablecer el acceso local sin borrar servidores ni históricos")
+	resetAccess := flag.Bool("reset-access", false, "Restablecer el acceso local sin borrar servidores ni históricos")
 	listenHost := flag.String("listen", "127.0.0.1", "Dirección de escucha; usa loopback detrás del proxy HTTPS")
 	publicURL := flag.String("public-url", "", "Origen HTTPS público del panel")
 	tlsCert := flag.String("tls-cert", "", "Certificado TLS opcional")
@@ -59,12 +59,12 @@ func main() {
 	if err := app.RecoverOperations(); err != nil {
 		log.Fatal(err)
 	}
-	if *resetPassword {
+	if *resetAccess {
 		if err := app.ResetAuthentication(); err != nil {
 			log.Fatal(err)
 		}
 	}
-	configured, err := app.PasswordConfigured()
+	configured, err := app.AccessConfigured()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -77,6 +77,9 @@ func main() {
 	app.StartCollection(ctx)
 	srv := &http.Server{Addr: address, Handler: app.Handler(files), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 3 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
 	origin := "http://" + address
+	if ip.IsLoopback() {
+		origin = fmt.Sprintf("http://localhost:%d", *port)
+	}
 	if *tlsCert != "" {
 		origin = "https://" + address
 	}
@@ -85,9 +88,9 @@ func main() {
 	}
 	fmt.Printf("\nNodo: %s\n", origin)
 	if configured {
-		fmt.Println("Acceso con tu PIN. Las sesiones recordadas siguen activas tras reiniciar.")
+		fmt.Println("Acceso con tu passkey. Las sesiones recordadas siguen activas tras reiniciar.")
 	} else {
-		fmt.Printf("Configura tu PIN una sola vez abriendo este enlace privado:\n%s/#setup=%s\n", origin, hex.EncodeToString(token))
+		fmt.Printf("Registra tu passkey con este enlace privado de un solo uso (caduca en 15 minutos desde el arranque):\n%s/#setup=%s\n", origin, hex.EncodeToString(token))
 	}
 	shutdownDone := make(chan struct{})
 	go func() {

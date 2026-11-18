@@ -34,6 +34,7 @@
     port = 80,
     secure = true;
   let copied = false,
+    removeDomain = false,
     plan = null,
     job = null,
     jobID = '',
@@ -43,7 +44,12 @@
   $: selectedEnvironment = environment.find((service) => service.name === selectedService);
   $: hasDomainChange =
     domainEnabled &&
-    (domainMode === 'auto' || !chosenDomain || host.trim().toLowerCase() !== chosenDomain.host);
+    (removeDomain ||
+      secure !== chosenDomain?.https ||
+      domainMode === 'auto' ||
+      !chosenDomain ||
+      host.trim().toLowerCase() !== chosenDomain.host ||
+      Number(port) !== chosenDomain.port);
   $: variableChanges = environment
     .map((service) => ({
       name: service.name,
@@ -82,6 +88,7 @@
     }
   }
   function chooseDomain() {
+    removeDomain = false;
     const d = config?.domains.find((item) => item.id === domainID);
     host = d?.host || '';
     domainMode = 'custom';
@@ -122,6 +129,7 @@
     else if (environmentChanged) body.environment = variableChanges;
     if (hasDomainChange)
       body.domain = {
+        remove: removeDomain,
         id: domainID,
         host,
         automatic: domainMode === 'auto',
@@ -290,9 +298,8 @@
                 >{/if}
             </div>
             {#if domainEnabled}
-              {#if config.domains.length > 1 || (config.domains.length && !domainID)}<label
-                  class="field spaced"
-                  >Enlace a editar<select bind:value={domainID} on:change={chooseDomain}
+              {#if config.domains.length}<label class="field spaced"
+                  >Dominio a editar<select bind:value={domainID} on:change={chooseDomain}
                     >{#each config.domains as d}<option value={d.id}
                         >{d.host}{d.path && d.path !== '/' ? d.path : ''}{d.service
                           ? ' · ' + d.service
@@ -329,31 +336,48 @@
                 >{:else}<p class="small muted">
                   Generaremos un enlace único en sslip.io al revisar los cambios.
                 </p>{/if}
-              {#if !domainID}<div class="form-pair">
-                  {#if environment.length}<label class="field"
-                      >Servicio público<select bind:value={domainService} required
-                        >{#each environment as service}<option value={service.name}
-                            >{service.name}</option
-                          >{/each}</select
-                      ></label
-                    >{/if}<label class="field"
-                    >Puerto interno<input
-                      type="number"
-                      min="1"
-                      max="65535"
-                      bind:value={port}
-                      required
-                    /></label
-                  >
-                </div>
-                <label class="deploy-checkbox"
-                  ><input type="checkbox" bind:checked={secure} /><span>HTTPS automático</span
-                  ></label
+              <div class="form-pair">
+                {#if !domainID && environment.length}<label class="field"
+                    >Servicio público<select bind:value={domainService} required
+                      >{#each environment as service}<option value={service.name}
+                          >{service.name}</option
+                        >{/each}</select
+                    ></label
+                  >{/if}<label class="field"
+                  >Puerto interno<input
+                    type="number"
+                    min="1"
+                    max="65535"
+                    bind:value={port}
+                    required
+                  /></label
                 >
-              {:else}<p class="small muted">
-                  Se conservan el puerto, la ruta y la configuración {secure ? 'HTTPS' : 'HTTP'} actuales.
+              </div>
+              <p class="small muted">Puerto donde escucha la aplicación dentro del contenedor.</p>
+              <label class="deploy-checkbox"
+                ><input type="checkbox" bind:checked={secure} /><span
+                  >HTTPS con certificado automático</span
+                ></label
+              >
+              <p class="small muted">
+                Al activar HTTPS, se solicitará un certificado de Let's Encrypt. El dominio debe
+                apuntar a este servidor.
+              </p>
+              {#if domainID}<button
+                  type="button"
+                  class="text-button"
+                  on:click={() => (removeDomain = !removeDomain)}
+                  ><Trash2 size={14} />{removeDomain
+                    ? 'Cancelar eliminación del dominio'
+                    : 'Eliminar este dominio'}</button
+                >{/if}
+              {#if removeDomain}<p class="notice error">
+                  Se eliminará {chosenDomain.host} al revisar y aplicar los cambios. La aplicación seguirá
+                  funcionando.
                 </p>{/if}
-              {#if hasDomainChange && domainMode === 'custom'}<div class="dns-hint">
+              {#if hasDomainChange && domainMode === 'custom' && (!chosenDomain || host
+                    .trim()
+                    .toLowerCase() !== chosenDomain.host)}<div class="dns-hint">
                   <strong>Conecta el dominio en tu proveedor DNS</strong><span
                     >Registro A · {host || 'app.midominio.com'} →
                     <code>{config.publicIp || 'IP pública del servidor'}</code></span

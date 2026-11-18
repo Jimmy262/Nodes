@@ -46,6 +46,7 @@ type applicationConfiguration struct {
 	compose                 *editableCompose
 }
 type domainChange struct {
+	Remove    bool   `json:"remove"`
 	ID        string `json:"id"`
 	Host      string `json:"host"`
 	Automatic bool   `json:"automatic"`
@@ -310,13 +311,27 @@ func (a *App) applicationConfigurationPlan(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			d.Service = existing.Service
-			d.Port = existing.Port
-			d.HTTPS = existing.HTTPS
-			edit.domainChanged = d.Automatic || !strings.EqualFold(d.Host, existing.Host)
+			if d.Remove {
+				d.Host = existing.Host
+				d.Port = existing.Port
+				d.HTTPS = existing.HTTPS
+			}
+			edit.domainChanged = d.Remove || d.Automatic || !strings.EqualFold(d.Host, existing.Host) || d.Port != existing.Port || d.HTTPS != existing.HTTPS
 		} else {
 			edit.domainChanged = true
 		}
-		if edit.domainChanged {
+		if d.Remove {
+			if d.ID == "" {
+				fail(w, 400, "Selecciona el dominio que quieres eliminar")
+				return
+			}
+			p.Summary = append(p.Summary, "Eliminar dominio: "+d.Host)
+			p.Warnings = append(p.Warnings, "Este dominio dejará de abrir la aplicación. La aplicación y sus datos se conservan.")
+		} else if edit.domainChanged {
+			if d.Port < 1 || d.Port > 65535 {
+				fail(w, 400, "Indica el puerto interno de la aplicación (1–65535)")
+				return
+			}
 			if d.ID == "" && c.kind != "application" {
 				found := false
 				for _, service := range c.Environment {
@@ -334,13 +349,27 @@ func (a *App) applicationConfigurationPlan(w http.ResponseWriter, r *http.Reques
 				mode = "auto"
 			}
 			p.project = "app-" + p.ID[:12]
-			if e = a.prepareAccess(r.Context(), p, mode, d.Host, d.Service, d.Port, d.HTTPS); e != nil {
-				fail(w, 400, e.Error())
-				return
+			portOnly := false
+			for _, existing := range c.Domains {
+				if existing.ID == d.ID && !d.Automatic && strings.EqualFold(d.Host, existing.Host) && d.HTTPS == existing.HTTPS {
+					portOnly = true
+				}
 			}
-			d.Host = p.access.Domain
+			if !portOnly {
+				if e = a.prepareAccess(r.Context(), p, mode, d.Host, d.Service, d.Port, d.HTTPS); e != nil {
+					fail(w, 400, e.Error())
+					return
+				}
+				d.Host = p.access.Domain
+			}
 			p.Summary = append(p.Summary, "Dominio: "+d.Host)
-			if d.ID != "" {
+			p.Summary = append(p.Summary, fmt.Sprintf("Puerto interno: %d", d.Port))
+			if d.HTTPS {
+				p.Summary = append(p.Summary, "HTTPS con certificado automático habilitado.")
+			} else {
+				p.Summary = append(p.Summary, "Acceso HTTP sin certificado.")
+			}
+			if d.ID != "" && !editingCurrentDomain(p, d.Host) {
 				p.Warnings = append(p.Warnings, "El dominio anterior de esta ruta dejará de abrir la aplicación. Los otros dominios se conservarán.")
 			}
 		}

@@ -210,7 +210,7 @@ func prepareSwarmEdit(p *operationPlan) error {
 				return err
 			}
 			changed := false
-			for _, value := range object(object(doc, "http"), "routers") {
+			for routerName, value := range object(object(doc, "http"), "routers") {
 				router, _ := value.(map[string]any)
 				backend := object(object(object(doc, "http"), "services"), strings.TrimSuffix(stringValue(router, "service"), "@file"))
 				targets := array(object(backend, "loadBalancer"), "servers")
@@ -221,7 +221,29 @@ func prepareSwarmEdit(p *operationPlan) error {
 					belongs = parseErr == nil && u.Hostname() == e.before.appName && u.Scheme == "http"
 				}
 				if belongs && simpleHostRule(stringValue(router, "rule"), old.Host) {
+					if d.Remove {
+						delete(object(object(doc, "http"), "routers"), routerName)
+						changed = true
+						continue
+					}
+					if old.HTTPS != d.HTTPS {
+						if p.access == nil {
+							return errors.New("No se revisó la configuración de certificados del proxy")
+						}
+						router["entryPoints"] = []any{p.access.Proxy.HTTPEntry}
+						delete(router, "tls")
+						if d.HTTPS {
+							router["entryPoints"] = []any{p.access.Proxy.HTTPSEntry}
+							router["tls"] = map[string]any{"certResolver": p.access.Proxy.Resolver}
+						}
+					}
 					router["rule"] = "Host(`" + d.Host + "`)"
+					if d.Port != old.Port {
+						target := targets[0].(map[string]any)
+						u, _ := url.Parse(stringValue(target, "url"))
+						u.Host = e.before.appName + ":" + strconv.Itoa(d.Port)
+						target["url"] = u.String()
+					}
 					changed = true
 				}
 			}
@@ -235,16 +257,22 @@ func prepareSwarmEdit(p *operationPlan) error {
 		if scope == "service" {
 			labels = object(e.swarmSpec, "Labels")
 		}
-		changed := false
-		for key, value := range labels {
-			rule, ok := value.(string)
-			if ok && strings.HasPrefix(key, "traefik.http.routers.") && strings.HasSuffix(key, ".rule") && simpleHostRule(rule, old.Host) {
-				labels[key] = "Host(`" + d.Host + "`)"
-				changed = true
-			}
+		values, err := composeStringMap(labels)
+		if err != nil {
+			return err
 		}
-		if !changed {
-			return errors.New("La ruta pública no es compatible con edición directa")
+		var proxy proxyOptions
+		if p.access != nil {
+			proxy = p.access.Proxy
+		}
+		if err = editDomainLabels(values, old, d, proxy); err != nil {
+			return err
+		}
+		for key := range labels {
+			delete(labels, key)
+		}
+		for key, value := range values {
+			labels[key] = value
 		}
 		return nil
 	}

@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import {
     X,
     GitBranch as Github,
@@ -8,10 +8,15 @@
     CheckCircle2,
     ExternalLink,
     RefreshCw,
+    Settings2,
+    ChevronDown,
   } from '@lucide/svelte';
   import { modal } from './format.js';
+  import GithubRepositoryPicker from './GithubRepositoryPicker.svelte';
+  import GithubPushSetup from './GithubPushSetup.svelte';
   export let servers;
   export let sourceId = null;
+  export let updatesOnly = false;
   export let api;
   export let onClose;
   export let onStarted;
@@ -27,18 +32,33 @@
     hasMore = false,
     runs = {},
     runErrors = {};
+  let repositoriesLoading = false,
+    repositoriesError = '',
+    repositoriesVersion = 0,
+    repositoriesAt = 0;
+  let updatingToken = false,
+    checkingRepository = false,
+    connectionVersion = 0;
   let creating = false,
     serverId = sourceId || servers[0]?.id || '',
     name = '',
     repository = '',
     branch = 'main',
-    buildPath = '.';
+    buildPath = '.',
+    composeFile = '';
   let service = '',
-    port = 80,
+    automaticPush = true,
+    port = '',
     hostPort = 8080,
-    access = 'port',
+    access = 'auto',
     domain = '',
-    secure = false;
+    secure = true;
+  let codeOpen = false,
+    runtimeOpen = false,
+    optionsLoading = false,
+    lastGeneratedName = '',
+    preparedId = '',
+    reviewPanel;
   let environment = [],
     options = null,
     optionsKey = '',
@@ -49,6 +69,7 @@
     alive = false,
     polling = false;
   $: if (alive && creating && String(serverId) !== optionsKey) loadOptions();
+  $: canReview = !!repository && !!serverId && !pending && !checkingRepository && !optionsLoading;
 
   async function load() {
     loading = true;
@@ -60,7 +81,8 @@
       if (!alive) return;
       connection = state;
       deployments = items;
-      if (state.connected) await loadRepositories();
+      if (!updatesOnly && state.connected && !items.length) creating = true;
+      if (!updatesOnly && state.connected) await loadRepositories();
     } catch (e) {
       if (alive) error = e.message;
     } finally {
@@ -68,12 +90,66 @@
     }
   }
   async function loadRepositories(more = false) {
+    if (repositoriesLoading) return;
+    const version = ++repositoriesVersion;
     const next = more ? page + 1 : 1;
-    const data = await api(`/github/repositories?page=${next}`);
-    if (!alive) return;
-    repositories = more ? [...repositories, ...data.items] : data.items;
-    hasMore = data.hasMore;
-    page = next;
+    repositoriesLoading = true;
+    repositoriesAt = Date.now();
+    repositoriesError = '';
+    try {
+      const data = await api(`/github/repositories?page=${next}`);
+      if (!alive || version !== repositoriesVersion) return;
+      const selected = repositories.find((item) => item.full_name === repository);
+      const rows = more ? [...repositories, ...data.items] : [...data.items];
+      if (selected && !rows.some((item) => item.full_name === repository)) rows.push(selected);
+      repositories = [...new Map(rows.map((item) => [item.full_name, item])).values()];
+      hasMore = data.hasMore;
+      page = next;
+      repositoriesAt = Date.now();
+    } catch (e) {
+      if (alive && version === repositoriesVersion) repositoriesError = e.message;
+    } finally {
+      if (version === repositoriesVersion) repositoriesLoading = false;
+    }
+  }
+  function newApplication() {
+    creating = true;
+    job = null;
+    notice = '';
+    loadRepositories();
+  }
+  function refreshOnReturn() {
+    if (
+      alive &&
+      connection?.connected &&
+      creating &&
+      !document.hidden &&
+      !pending &&
+      !plan &&
+      Date.now() - repositoriesAt > 10000
+    )
+      loadRepositories();
+  }
+  async function checkRepository(input = '') {
+    const version = connectionVersion;
+    checkingRepository = true;
+    repositoriesError = '';
+    try {
+      const name = input
+        .trim()
+        .replace(/^https:\/\/github\.com\//i, '')
+        .replace(/\/$/, '')
+        .replace(/\.git$/, '');
+      const item = await api(`/github/repository?name=${encodeURIComponent(name)}`);
+      if (!alive || version !== connectionVersion) return;
+      repositories = [item, ...repositories.filter((repo) => repo.full_name !== item.full_name)];
+      selectRepository(item.full_name);
+      notice = 'Repositorio añadido.';
+    } catch (e) {
+      if (alive && version === connectionVersion) repositoriesError = e.message;
+    } finally {
+      if (alive && version === connectionVersion) checkingRepository = false;
+    }
   }
   async function connect(event) {
     event.preventDefault();
@@ -84,8 +160,18 @@
         method: 'POST',
         body: JSON.stringify({ token }),
       });
+      connectionVersion++;
+      checkingRepository = false;
+      notice = '';
+      repositoriesVersion++;
+      repositoriesLoading = false;
+      repositories = [];
+      repository = '';
+      composeFile = '';
+      if (!updatesOnly && !deployments.length) creating = true;
+      updatingToken = false;
       token = '';
-      await loadRepositories();
+      if (!updatesOnly) await loadRepositories();
     } catch (e) {
       error = e.message;
     } finally {
@@ -98,6 +184,11 @@
     error = '';
     try {
       await api('/github/connection', { method: 'DELETE' });
+      connectionVersion++;
+      checkingRepository = false;
+      repositoriesVersion++;
+      repositoriesLoading = false;
+      repositoriesError = '';
       connection = { connected: false };
       repositories = [];
       notice =
@@ -108,36 +199,53 @@
       pending = false;
     }
   }
-  function selectRepository() {
+  function selectRepository(next = repository) {
+    if (next !== repository) composeFile = '';
+    repository = next;
     const item = repositories.find((r) => r.full_name === repository);
     branch = item?.default_branch || 'main';
-    if (!name)
-      name =
+    if (!name || name === lastGeneratedName) {
+      let generated =
         repository
           .split('/')[1]
           ?.toLowerCase()
           .replace(/[^a-z0-9-]/g, '-')
           .slice(0, 40) || '';
+      if (!/^[a-z]/.test(generated)) generated = 'app-' + generated;
+      if (generated.length < 2) generated += '-app';
+      name = generated.slice(0, 40);
+      lastGeneratedName = name;
+    }
   }
   async function loadOptions() {
     optionsKey = String(serverId);
     options = null;
+    optionsLoading = true;
     const version = ++optionsVersion;
     try {
       const data = await api(`/servers/${serverId}/deploy/options`);
       if (alive && version === optionsVersion) {
         options = data;
         if (!data.available) access = 'port';
+        secure = data.https;
       }
     } catch (e) {
       if (alive && version === optionsVersion) {
         error = e.message;
         access = 'port';
       }
+    } finally {
+      if (alive && version === optionsVersion) optionsLoading = false;
     }
   }
   async function review(event) {
     event.preventDefault();
+    if (!canReview) return;
+    if (!/^[a-z][a-z0-9-]{1,39}$/.test(name) || !branch.trim() || !buildPath.trim()) {
+      codeOpen = true;
+      error = 'Completa el nombre, la rama y la carpeta en Código y nombre.';
+      return;
+    }
     pending = true;
     error = '';
     notice = '';
@@ -151,9 +259,11 @@
           repository,
           branch,
           buildPath,
+          composeFile: composeFile.trim(),
           service,
           port: Number(port),
           hostPort: Number(hostPort),
+          automaticPush,
           access,
           domain,
           https: secure,
@@ -162,8 +272,12 @@
             .map((e) => ({ name: e.name.trim(), value: e.value })),
         }),
       });
+      await tick();
+      reviewPanel?.scrollIntoView({ block: 'start' });
     } catch (e) {
       error = e.message;
+      if (/servicio público|puerto interno|puertos/i.test(e.message)) runtimeOpen = true;
+      if (/nombre|rama|carpeta|Dockerfile|Compose/i.test(e.message)) codeOpen = true;
     } finally {
       pending = false;
     }
@@ -182,6 +296,7 @@
         body: JSON.stringify({ name: plan.name, acknowledged: true }),
       });
       jobId = data.id;
+      preparedId = plan.kind === 'github-setup' ? plan.id : '';
       job = { status: 'running', message: 'Comprobando la configuración…' };
       environment = [];
       onStarted();
@@ -217,7 +332,28 @@
     job = null;
     notice = '';
     try {
-      plan = await api(`/github/deployments/${item.id}/deploy`, { method: 'POST' });
+      plan = await api(`/github/deployments/${item.id}/deploy`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(150000),
+      });
+      await tick();
+      reviewPanel?.scrollIntoView({ block: 'start' });
+    } catch (e) {
+      error = e.message;
+    } finally {
+      pending = false;
+    }
+  }
+  async function activatePush(item) {
+    pending = true;
+    error = '';
+    notice = '';
+    job = null;
+    try {
+      plan = await api(`/github/deployments/${item.id}/push/plan`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(150000),
+      });
     } catch (e) {
       error = e.message;
     } finally {
@@ -230,7 +366,7 @@
     try {
       await api(`/github/deployments/${item.id}/publish`, { method: 'POST' });
       notice =
-        'Workflow publicado. Los siguientes pushes a la rama configurada iniciarán el despliegue.';
+        'Workflow publicado. Completa los secretos SSH para permitir los despliegues por push.';
     } catch (e) {
       error = e.message;
     } finally {
@@ -260,58 +396,56 @@
     environment = [];
     onClose();
   }
-  const secrets = [
-    [
-      'HOST',
-      'IP pública o dominio de la VPS, accesible desde GitHub. Los alias SSH de tu PC no funcionan aquí.',
-    ],
-    ['PORT', 'Puerto SSH de la VPS (normalmente 22).'],
-    ['USER', 'El mismo usuario SSH que conectaste a Nodes.'],
-    [
-      'SSH_KEY',
-      'Clave privada dedicada a estos despliegues, sin contraseña. Autoriza su clave pública en la VPS.',
-    ],
-    [
-      'KNOWN_HOSTS',
-      'Línea de known_hosts cuya huella hayas verificado. Para puertos distintos de 22, usa [host]:puerto.',
-    ],
-  ];
   onMount(() => {
     alive = true;
     load();
     const timer = setInterval(poll, 2500);
+    window.addEventListener('focus', refreshOnReturn);
+    document.addEventListener('visibilitychange', refreshOnReturn);
     return () => {
       alive = false;
       optionsVersion++;
+      connectionVersion++;
+      repositoriesVersion++;
       token = '';
       environment = [];
       clearInterval(timer);
+      window.removeEventListener('focus', refreshOnReturn);
+      document.removeEventListener('visibilitychange', refreshOnReturn);
     };
   });
 </script>
 
 <dialog
   use:modal
-  class="form-dialog deployment-dialog github-dialog"
+  class="form-dialog deployment-dialog github-dialog github-flow"
   aria-labelledby="github-title"
   on:cancel={close}
 >
-  <header>
+  <header class="gh-flow-header">
     <div>
-      <span class="eyebrow">DESPLIEGUES POR PUSH</span>
-      <h2 id="github-title"><Github size={22} /> GitHub</h2>
+      <h2 id="github-title">
+        <Github size={20} />{plan
+          ? plan.kind === 'github-push'
+            ? 'Activar despliegue automático'
+            : 'Revisar despliegue'
+          : creating
+            ? 'Desplegar desde GitHub'
+            : updatesOnly ? 'Actualizaciones de GitHub' : 'GitHub'}
+      </h2>
     </div>
     <button class="icon-button" disabled={pending} on:click={close} aria-label="Cerrar GitHub"
       ><X size={20} /></button
     >
   </header>
-  <p class="small muted">
-    Despliega en tus VPS con Docker Compose. Los pushes se ejecutan con GitHub Actions, incluso con
-    Nodes cerrado.
-  </p>
-  {#if loading}<p aria-live="polite">Cargando conexión…</p>
-  {:else if !connection?.connected}
-    <form on:submit={connect}>
+  {#if loading}<p class="small muted" role="status">Cargando GitHub…</p>
+  {:else if !connection?.connected || updatingToken}
+    <form on:submit={connect} class="gh-connect-form">
+      <p class="small muted">
+        {updatingToken
+          ? 'Reemplaza el token sin perder tus aplicaciones.'
+          : 'Conecta tu cuenta una sola vez.'}
+      </p>
       <label class="field"
         >Token personal de GitHub<input
           type="password"
@@ -322,221 +456,195 @@
           maxlength="2048"
         /></label
       >
-      <p class="small muted">
-        Crea un token de acceso granular para los repositorios elegidos: Contents y Workflows con
-        escritura, y Actions con lectura. Si la organización exige autorización, apruébala en
-        GitHub. Nodes lo cifra con protección de tu cuenta de Windows.
-      </p>
+      <details class="gh-inline-help">
+        <summary>Qué permisos necesita el token</summary>
+        <p>
+          Incluye los repositorios que usarás. Contents y Workflows: lectura y escritura. Actions:
+          lectura. Secrets: lectura y escritura para configurar los pushes automáticamente. Si tu organización lo exige, autoriza el token allí. Nodes lo guarda cifrado.
+        </p>
+      </details>
       <div class="button-row">
         <button class="primary" disabled={pending}
-          >{pending ? 'Conectando…' : 'Conectar GitHub'}</button
-        >
-        <a
+          >{pending ? 'Conectando…' : updatingToken ? 'Guardar token' : 'Conectar GitHub'}</button
+        >{#if updatingToken}<button
+            type="button"
+            class="secondary"
+            disabled={pending}
+            on:click={() => {
+              updatingToken = false;
+              token = '';
+              error = '';
+            }}>Cancelar</button
+          >{/if}<a
           class="text-button"
           href="https://github.com/settings/personal-access-tokens/new"
           target="_blank"
-          rel="noopener noreferrer">Crear token <ExternalLink size={14} /></a
+          rel="noopener noreferrer">Crear token<ExternalLink size={14} /></a
         >
       </div>
     </form>
   {:else}
-    <div class="section-heading">
-      <span class="small">Conectado como <strong>{connection.login}</strong></span><button
-        class="text-button"
-        disabled={pending || !!plan || job?.status === 'running'}
-        on:click={disconnect}>Desconectar</button
-      >
+    <div class="gh-flow-context">
+      <span><i></i>{connection.login}</span>
+      <details class="gh-account-settings">
+        <summary><Settings2 size={15} />Conexión<ChevronDown size={12} /></summary>
+        <div>
+          <button
+            type="button"
+            class="text-button"
+            disabled={pending || !!plan || job?.status === 'running'}
+            on:click={() => {
+              updatingToken = true;
+              token = '';
+              error = '';
+              notice = '';
+            }}>Actualizar token</button
+          ><button
+            type="button"
+            class="text-button"
+            disabled={pending || !!plan || job?.status === 'running'}
+            on:click={disconnect}>Desconectar</button
+          >
+        </div>
+      </details>
     </div>
     {#if job}<div
-        class="notice"
-        class:error={job.status === 'failed' || job.status === 'interrupted'}
-        aria-live="polite"
+        class="gh-job-status"
+        class:failed={job.status === 'failed' || job.status === 'interrupted'}
+        role="status"
       >
         {#if job.status === 'running'}<LoaderCircle
             class="spinner"
-            size={16}
-          />{:else if job.status === 'succeeded'}<CheckCircle2 size={16} />{/if}
-        {job.message}
-        {#if job.status === 'running'}<p class="small">
-            Mantén Nodes abierto durante esta operación. Los despliegues automáticos posteriores se
-            ejecutan en GitHub.
-          </p>{/if}
-      </div>{/if}
-    {#if !creating && !plan && job?.status !== 'running'}
-      <div class="deploy-section">
-        <div class="section-heading">
-          <h3>Aplicaciones conectadas</h3>
-          <button
-            class="secondary"
-            disabled={pending}
-            on:click={() => {
-              creating = true;
-              job = null;
-              notice = '';
-            }}><Plus size={15} /> Nueva aplicación</button
+            size={18}
+          />{:else if job.status === 'succeeded'}<CheckCircle2 size={18} />{/if}
+        <div>
+          <strong
+            >{job.status === 'running'
+              ? 'Preparando despliegue…'
+              : job.status === 'succeeded'
+                ? 'Operación completada'
+                : 'Revisa el resultado'}</strong
           >
+          <p>{job.message}</p>
+          {#if job.status === 'running'}<small
+              >Mantén Nodes abierto. Puedes seguir el progreso en Actividad.</small
+            >{/if}
         </div>
-        {#if !deployments.length}<p class="small muted">
-            Conecta un repositorio para preparar tu primer despliegue.
-          </p>{/if}
-        {#each deployments as item (item.id)}
-          <article class="github-application">
-            <h3>{item.name}</h3>
-            <p class="small muted">
-              {item.repository} · {item.branch} · {servers.find((s) => s.id === item.serverId)
-                ?.name || 'Servidor'}
-            </p>
-            <div class="button-row">
-              <button class="primary" disabled={pending} on:click={() => deploy(item)}
-                >Desplegar última versión</button
-              >
-              <button class="secondary" disabled={pending} on:click={() => refreshRuns(item)}
-                ><RefreshCw size={14} /> Ejecuciones por push</button
-              >
-              {#if item.url}<a
-                  class="text-button"
-                  href={item.url}
-                  target="_blank"
-                  rel="noopener noreferrer">Abrir aplicación <ExternalLink size={14} /></a
-                >{/if}
-            </div>
-            <details class="github-instructions">
-              <summary>Activar despliegue automático · secretos SSH</summary>
-              <p class="small">
-                En el repositorio → Settings → Secrets and variables → Actions, añade estos cinco
-                secretos. El usuario y la VPS deben coincidir con la conexión de Nodes. Usa una clave
-                dedicada; Nodes no copia tu clave privada a GitHub.
-              </p>
-              <dl>
-                {#each secrets as [suffix, description]}<dt>
-                    <code>{item.secretPrefix}_{suffix}</code>
-                  </dt>
-                  <dd>{description}</dd>{/each}
-              </dl>
-              <p class="small muted">
-                Verifica la huella del servidor por un canal de confianza antes de guardar
-                KNOWN_HOSTS. La VPS debe aceptar conexiones SSH desde los runners de GitHub. Los
-                minutos de Actions están sujetos a tu plan de GitHub.
-              </p>
-              <p class="small">
-                Workflow: <code>.github/workflows/{item.workflow}</code>. Escucha únicamente los
-                pushes a <strong>{item.branch}</strong>. Para detenerlos, desactiva ese workflow en
-                Actions.
-              </p>
-              <button class="secondary" disabled={pending} on:click={() => publish(item)}
-                >Publicar workflow pendiente</button
-              >
-              <a
-                class="text-button"
-                href={`https://github.com/${item.repository}/settings/secrets/actions`}
-                target="_blank"
-                rel="noopener noreferrer">Configurar secretos <ExternalLink size={14} /></a
-              >
-            </details>
-            {#if runErrors[item.id]}<p class="notice error">{runErrors[item.id]}</p>{/if}
-            {#if runs[item.id]}<div class="github-runs">
-                <p class="small muted">
-                  GitHub Actions · los despliegues manuales de Nodes aparecen en Actividad.
-                </p>
-                {#each runs[item.id] as run}<a
-                    href={run.html_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    ><code>{run.head_sha.slice(0, 8)}</code><span
-                      >{run.conclusion || run.status}</span
-                    ><time>{new Date(run.created_at).toLocaleString('es-PE')}</time><ExternalLink
-                      size={13}
-                    /></a
-                  >{:else}<p class="small muted">
-                    Aún no hay ejecuciones. Comprueba que el workflow esté publicado y haz push a la
-                    rama configurada.
-                  </p>{/each}
-              </div>{/if}
-          </article>
-        {/each}
+      </div>{/if}
+
+    {#if !creating && !plan && job?.status !== 'running'}
+      <div class="gh-applications-heading">
+        <h3>Aplicaciones</h3>
+        <button class="primary" disabled={pending} on:click={newApplication}
+          ><Plus size={15} />Nueva aplicación</button
+        >
       </div>
-    {/if}
-    {#if creating && !plan && job?.status !== 'running'}
-      <form on:submit={review} class="deployment-form">
-        <fieldset disabled={pending}>
-          <div class="form-pair">
-            <label class="field"
-              >Nombre<input
-                bind:value={name}
-                required
-                minlength="2"
-                maxlength="40"
-                pattern="[a-z][a-z0-9-]{(1, 39)}"
-              /></label
-            >
-            <label class="field"
-              >Servidor<select bind:value={serverId} required
-                >{#each servers as server}<option value={server.id}>{server.name}</option
-                  >{/each}</select
-              ></label
+      {#each deployments as item (item.id)}
+        <article class="github-application">
+          <div class="gh-app-heading">
+            <div>
+              <h3>{item.name}</h3>
+              <p>{item.repository} · {item.branch}</p>
+              <small
+                >{servers.find((server) => server.id === item.serverId)?.name || 'Servidor'}</small
+              >
+            </div>
+            {#if item.url}<a
+                class="icon-button"
+                href={item.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`Abrir ${item.name}`}
+                title="Abrir aplicación"><ExternalLink size={17} /></a
+              >{/if}
+          </div>
+          <div class="button-row">
+            <button class="secondary" disabled={pending} on:click={() => deploy(item)}
+              >{updatesOnly ? 'Revisar actualización' : 'Desplegar ahora'}</button
+            ><button class="text-button" disabled={pending} on:click={() => refreshRuns(item)}
+              ><RefreshCw size={14} />Ver actividad</button
             >
           </div>
+          {#if runErrors[item.id]}<p class="notice error" role="alert">{runErrors[item.id]}</p>{/if}
+          {#if runs[item.id]}<div class="github-runs">
+              {#each runs[item.id] as run}<a
+                  href={run.html_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><code>{run.head_sha.slice(0, 8)}</code><span>{run.conclusion || run.status}</span
+                  ><time>{new Date(run.created_at).toLocaleString('es-PE')}</time><ExternalLink
+                    size={13}
+                  /></a
+                >{:else}<p class="small muted">
+                  Aún no hay ejecuciones. Completa la configuración del push y envía un commit.
+                </p>{/each}
+            </div>{/if}
+          {#if !updatesOnly}<GithubPushSetup
+            deployment={item}
+            server={servers.find((server) => server.id === item.serverId)}
+            open={item.id === preparedId}
+            {pending}
+            onPublish={publish}
+            onActivate={activatePush}
+          />{/if}
+        </article>
+      {/each}
+      {#if !deployments.length}<p class="small muted">
+          {updatesOnly
+            ? 'Aún no hay aplicaciones vinculadas a GitHub. Usa Nueva aplicación para preparar la primera.'
+            : 'Conecta un repositorio para tu primera aplicación.'}
+        </p>{/if}
+      {#if repositoriesError}<p class="notice error" role="alert">{repositoriesError}</p>{/if}
+    {/if}
+
+    {#if creating && !plan && job?.status !== 'running'}
+      <form on:submit={review} class="gh-deploy-form">
+        <fieldset disabled={pending}>
+          <GithubRepositoryPicker
+            {repositories}
+            value={repository}
+            loading={repositoriesLoading || checkingRepository}
+            error={repositoriesError}
+            {hasMore}
+            onSelect={selectRepository}
+            onRefresh={() => loadRepositories()}
+            onMore={() => loadRepositories(true)}
+            onLookup={checkRepository}
+          />
           <label class="field"
-            >Repositorio<select bind:value={repository} on:change={selectRepository} required
-              ><option value="" disabled>Seleccionar repositorio</option
-              >{#each repositories as repo}<option value={repo.full_name}
-                  >{repo.full_name}{repo.private ? ' · privado' : ''}</option
+            >Servidor de destino<select bind:value={serverId} required
+              >{#each servers as server}<option value={server.id}>{server.name}</option
                 >{/each}</select
             ></label
           >
-          {#if hasMore}<button
-              type="button"
-              class="text-button"
-              on:click={async () => {
-                try {
-                  await loadRepositories(true);
-                } catch (e) {
-                  error = e.message;
-                }
-              }}>Cargar más repositorios</button
-            >{/if}
-          <div class="form-pair">
-            <label class="field">Rama<input bind:value={branch} required maxlength="200" /></label
-            ><label class="field"
-              >Carpeta del proyecto<input
-                bind:value={buildPath}
-                placeholder=". o apps/web"
-                required
-              /></label
-            >
-          </div>
-          <p class="small muted">
-            Incluye un solo Compose principal o un Dockerfile en esa carpeta. Se revisará el código
-            antes de preparar la VPS. No se admiten submódulos, Git LFS ni enlaces simbólicos.
-          </p>
-          <div class="form-pair">
-            <label class="field"
-              >Servicio público<input
-                bind:value={service}
-                placeholder="app · opcional si hay un solo servicio"
-              /></label
-            ><label class="field"
-              >Puerto interno<input
-                type="number"
-                bind:value={port}
-                min="1"
-                max="65535"
-                required
-              /></label
-            >
-          </div>
-          <div class="deploy-section">
-            <h3>Acceso</h3>
+          <section class="gh-access">
+            <div class="gh-field-heading">
+              <span>Acceso público</span>{#if optionsLoading}<small role="status"
+                  >Comprobando servidor…</small
+                >{/if}
+            </div>
             <div class="access-choices" role="group" aria-label="Acceso de la aplicación">
-              {#each [{ value: 'port', label: 'IP y puerto' }, { value: 'auto', label: 'Automático' }, { value: 'custom', label: 'Mi dominio' }] as choice}<button
+              {#each [{ value: 'auto', label: 'Enlace automático' }, { value: 'custom', label: 'Mi dominio' }, { value: 'port', label: 'IP y puerto' }] as choice}<button
                   type="button"
                   class:active={access === choice.value}
-                  disabled={choice.value !== 'port' && !options?.available}
+                  disabled={optionsLoading || (choice.value !== 'port' && !options?.available)}
                   on:click={() => (access = choice.value)}>{choice.label}</button
                 >{/each}
             </div>
-            {#if access === 'port'}<label class="field"
-                >Puerto del servidor (Dockerfile)<input
+            {#if options && !options.available}<p class="gh-field-hint">
+                Sin proxy compatible detectado. Disponible: IP y puerto.
+              </p>{/if}
+            {#if access === 'custom'}<label class="field"
+                >Dominio<input
+                  bind:value={domain}
+                  placeholder="app.midominio.com"
+                  required
+                /></label
+              >
+              <p class="gh-field-hint">
+                DNS A → {options?.publicIp || 'IP de la VPS'}
+              </p>{:else if access === 'port'}<label class="field"
+                >Puerto del servidor<input
                   type="number"
                   bind:value={hostPort}
                   min="1"
@@ -544,110 +652,241 @@
                   required
                 /></label
               >
-              <p class="small muted">
-                Con Compose se conservan sus puertos publicados. Con Dockerfile se publica el puerto
-                elegido.
+              <p class="gh-field-hint">
+                Se usa con Dockerfile. Compose conserva los puertos de su archivo.
+              </p>{:else}<p class="gh-field-hint">Se generará un enlace para la aplicación.</p>{/if}
+            {#if access !== 'port'}<label class="deploy-checkbox"
+                ><input
+                  type="checkbox"
+                  bind:checked={secure}
+                  disabled={!options?.https}
+                />HTTPS</label
+              >{/if}
+          </section>
+          <details class="gh-form-options">
+            <summary
+              >Variables de entorno <span
+                >{environment.length ? environment.length : 'Opcional'}</span
+              ></summary
+            >
+            <div>
+              {#each environment as variable, index}<div class="environment-row">
+                  <input
+                    aria-label={`Nombre de variable ${index + 1}`}
+                    bind:value={variable.name}
+                    placeholder="API_KEY"
+                    autocomplete="off"
+                  /><input
+                    type="password"
+                    aria-label={`Valor de variable ${index + 1}`}
+                    bind:value={variable.value}
+                    placeholder="Valor"
+                    autocomplete="off"
+                  /><button
+                    type="button"
+                    class="icon-button"
+                    aria-label="Quitar variable"
+                    on:click={() => (environment = environment.filter((_, i) => i !== index))}
+                    ><X size={14} /></button
+                  >
+                </div>{/each}<button
+                type="button"
+                class="text-button"
+                on:click={() => (environment = [...environment, { name: '', value: '' }])}
+                ><Plus size={14} />Añadir variable</button
+              >
+              <p class="gh-field-hint">
+                Se guardan fuera del código y del contexto de construcción.
               </p>
-            {:else}
-              {#if access === 'custom'}<label class="field"
-                  >Dominio<input
-                    bind:value={domain}
-                    placeholder="app.midominio.com"
-                    required
+            </div>
+          </details>
+          <details class="gh-form-options" bind:open={codeOpen}>
+            <summary
+              >Código y nombre <span>{branch} · {buildPath === '.' ? 'Raíz' : buildPath}</span
+              ></summary
+            >
+            <div>
+              <label class="field"
+                >Nombre de la aplicación<input
+                  bind:value={name}
+                  minlength="2"
+                  maxlength="40"
+                  on:invalid={() => (codeOpen = true)}
+                /></label
+              >
+              <div class="form-pair">
+                <label class="field">Rama<input bind:value={branch} maxlength="200" /></label><label
+                  class="field"
+                  >Carpeta del proyecto<input
+                    bind:value={buildPath}
+                    placeholder=". o apps/web"
                   /></label
                 >
-                <p class="small muted">
-                  Crea el registro A apuntando a {options?.publicIp || 'la IP de la VPS'}. El DNS se
-                  comprobará al revisar.
-                </p>{:else}<p class="small muted">
-                  Se generará un dominio sslip.io para {options?.publicIp}.
-                </p>{/if}
-              <label class="deploy-checkbox"
-                ><input type="checkbox" bind:checked={secure} disabled={!options?.https} /> HTTPS automático</label
-              >
-            {/if}
-          </div>
-          <div class="deploy-section">
-            <h3>Variables del servicio público</h3>
-            {#each environment as variable, index}<div class="environment-row">
-                <input
-                  aria-label={`Nombre de variable ${index + 1}`}
-                  bind:value={variable.name}
-                  placeholder="API_KEY"
-                  autocomplete="off"
-                /><input
-                  type="password"
-                  aria-label={`Valor de variable ${index + 1}`}
-                  bind:value={variable.value}
-                  placeholder="Valor"
-                  autocomplete="off"
-                /><button
-                  type="button"
-                  class="icon-button"
-                  aria-label="Quitar variable"
-                  on:click={() => (environment = environment.filter((_, i) => i !== index))}
-                  ><X size={14} /></button
+              </div>
+              <label class="field">
+                Archivo Compose
+                <input bind:value={composeFile} maxlength="120" placeholder="Detección automática" />
+              </label>
+              <p class="gh-field-hint">
+                Si el repositorio tiene varias configuraciones, indica el nombre del archivo de
+                despliegue en la carpeta elegida. Usa un Compose completo con redes propias del proyecto.
+              </p>
+            </div>
+          </details>
+          <details class="gh-form-options" bind:open={runtimeOpen}>
+            <summary>Ajustes avanzados <span>Servicio y puerto</span></summary>
+            <div>
+              <div class="form-pair">
+                <label class="field"
+                  >Servicio público<input
+                    bind:value={service}
+                    placeholder="Detectar del Compose"
+                  /></label
+                ><label class="field"
+                  >Puerto interno<input
+                    type="number"
+                    bind:value={port}
+                    on:invalid={() => (runtimeOpen = true)}
+                    min="1"
+                    max="65535"
+                    placeholder="Automático desde Compose o Dockerfile"
+                  /></label
                 >
-              </div>{/each}
-            <button
+              </div>
+              <p class="gh-field-hint">
+                Déjalos vacíos para detectar el servicio y su puerto interno desde Compose o
+                Dockerfile. Si hay varios puertos posibles, tendrás que indicar el correcto.
+              </p>
+              <details class="gh-inline-help">
+                <summary>Compatibilidad y datos</summary>
+                <p>
+                  Incluye un Compose principal o Dockerfile. No se admiten submódulos, Git LFS ni
+                  enlaces simbólicos. Los datos persistentes deben ir en volúmenes Docker; las
+                  carpetas relativas pertenecen a cada versión del código.
+                </p>
+              </details>
+              <label class="deploy-checkbox"
+                ><input type="checkbox" bind:checked={automaticPush} /><span
+                  >Configurar automáticamente el despliegue por push</span
+                ></label
+              >
+              <p class="small muted">
+                Se creará una clave exclusiva para Actions. El token necesita permiso Secrets:
+                lectura y escritura.
+              </p>
+            </div>
+          </details>
+        </fieldset>
+        {#if error}<p class="notice error" role="alert">{error}</p>{/if}
+        <footer class="gh-flow-footer">
+          <span>Primero revisarás los cambios.</span>
+          <div>
+            <button class="primary" disabled={!canReview}
+              >{pending ? 'Revisando…' : 'Revisar despliegue'}</button
+            ><button
               type="button"
               class="text-button"
-              on:click={() => (environment = [...environment, { name: '', value: '' }])}
-              ><Plus size={14} /> Añadir variable</button
+              disabled={pending}
+              on:click={() => {
+                creating = false;
+                error = '';
+              }}>Volver</button
             >
-            <p class="small muted">
-              Se guardan en una carpeta privada de la VPS, fuera del código y del contexto de
-              construcción. Los datos persistentes deben usar volúmenes Docker; las carpetas
-              relativas pertenecen a cada versión del código.
-            </p>
           </div>
-        </fieldset>
-        <div class="button-row">
-          <button class="primary" disabled={pending}
-            >{pending ? 'Revisando repositorio…' : 'Revisar conexión y despliegue'}</button
-          ><button
-            type="button"
-            class="secondary"
-            disabled={pending}
-            on:click={() => (creating = false)}>Volver</button
-          >
-        </div>
+        </footer>
       </form>
     {/if}
-    {#if plan && !jobId}<div class="deployment-review" aria-live="polite">
-        <h3>
-          {plan.kind === 'github-setup' ? 'Preparar despliegue por push' : 'Desplegar este commit'}
-        </h3>
-        {#if plan.url}<p class="planned-url">{plan.url}</p>{/if}
-        {#if plan.dns}<p class="notice" class:warning={!plan.dns.ready}>{plan.dns.message}</p>{/if}
-        <ul>
-          {#each plan.summary as line}<li>{line}</li>{/each}
+
+    {#if plan && !jobId}<section class="gh-review" aria-live="polite" bind:this={reviewPanel}>
+        <p class="gh-field-hint">
+          {plan.kind === 'github-setup' ? 'Preparación inicial · 1 de 2' : 'Despliegue manual'}
+        </p>
+        <h3>{plan.name}</h3>
+        <dl class="gh-review-facts">
+          <div>
+            <dt>Servidor</dt>
+            <dd>{plan.source}</dd>
+          </div>
+          {#if plan.kind === 'github-setup'}<div>
+              <dt>Repositorio</dt>
+              <dd>{repository}</dd>
+            </div>
+            <div>
+              <dt>Rama</dt>
+              <dd>{branch}</dd>
+            </div>
+            <div>
+              <dt>Acceso</dt>
+              <dd>{plan.url || 'IP y puertos del proyecto'}</dd>
+            </div>{/if}
+          {#if plan.environmentKeys?.length}<div>
+              <dt>Variables</dt>
+              <dd>{plan.environmentKeys.join(', ')}</dd>
+            </div>{/if}
+        </dl>
+        <ul class="gh-review-summary">
+          {#each plan.review?.summary || plan.summary as line}<li>{line}</li>{/each}
         </ul>
-        {#each plan.blockers as blocker}<p class="notice error">{blocker}</p>{/each}
-        {#each plan.warnings as warning}<p class="small muted">{warning}</p>{/each}
-        {#if plan.workflow}<details class="github-instructions">
-            <summary>Ver el workflow que se publicará</summary>
-            <pre>{plan.workflow}</pre>
-          </details>{/if}
-        <div class="button-row">
-          <button class="primary" disabled={pending || !!plan.blockers.length} on:click={execute}
+        {#if plan.kind === 'github-setup'}<p class="gh-next-step">
+            {automaticPush
+              ? 'Los secretos SSH se configurarán automáticamente antes de publicar el workflow.'
+              : 'Después: añade los secretos SSH en GitHub para activar los pushes.'}
+          </p>{/if}
+        {#if plan.dns}<p class="small" class:warning={!plan.dns.ready}>{plan.dns.message}</p>{/if}
+        {#each plan.blockers as blocker}<p class="notice error" role="alert">{blocker}</p>{/each}
+        <ul class="gh-review-warnings">
+          {#each plan.review?.warnings || plan.warnings as warning}<li>{warning}</li>{/each}
+        </ul>
+        <details class="gh-form-options">
+          <summary>Detalles técnicos y workflow</summary>
+          <div>
+            <ul>
+              {#each plan.summary as line}<li>{line}</li>{/each}
+            </ul>
+            {#each plan.warnings as warning}<p>
+                {warning}
+              </p>{/each}{#if plan.workflow}<pre>{plan.workflow}</pre>{/if}
+          </div>
+        </details>
+        {#if error}<p class="notice error" role="alert">{error}</p>{/if}
+        <footer class="gh-flow-footer">
+          <span
             >{plan.kind === 'github-setup'
-              ? 'Preparar VPS y publicar workflow'
-              : 'Desplegar commit'}</button
-          ><button
-            class="secondary"
-            disabled={pending}
-            on:click={async () => {
-              try {
-                await discard();
-              } catch (e) {
-                error = e.message;
-              }
-            }}>Volver</button
+              ? 'Se preparará la VPS y se publicará el workflow.'
+              : plan.kind === 'github-push'
+                ? 'Se configurarán los secretos y el acceso para los pushes.'
+                : 'Se actualizará la aplicación en el servidor.'}</span
           >
-        </div>
-      </div>{/if}
+          <div>
+            <button class="primary" disabled={pending || !!plan.blockers.length} on:click={execute}
+              >{pending
+                ? 'Iniciando…'
+                : plan.kind === 'github-setup'
+                  ? 'Conectar y preparar'
+                  : plan.kind === 'github-push'
+                    ? 'Activar despliegue automático'
+                    : 'Desplegar commit'}</button
+            ><button
+              type="button"
+              class="text-button"
+              disabled={pending}
+              on:click={async () => {
+                try {
+                  await discard();
+                } catch (e) {
+                  error = e.message;
+                }
+              }}>Editar</button
+            >
+          </div>
+        </footer>
+      </section>{/if}
   {/if}
-  {#if notice}<p class="notice" aria-live="polite">{notice}</p>{/if}
-  {#if error}<p class="notice error spaced" role="alert">{error}</p>{/if}
+  {#if notice}<p class="notice" role="status">{notice}</p>{/if}
+  {#if error && (!creating || !connection?.connected || updatingToken) && !plan}<p
+      class="notice error"
+      role="alert"
+    >
+      {error}
+    </p>{/if}
 </dialog>

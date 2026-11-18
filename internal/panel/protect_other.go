@@ -11,7 +11,6 @@ import (
 	"os"
 )
 
-const protectedHashPrefix = "nodo-key-v1:"
 
 func secretCipher() (cipher.AEAD, error) {
 	key, err := hex.DecodeString(os.Getenv("NODO_MASTER_KEY"))

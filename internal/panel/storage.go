@@ -36,10 +36,14 @@ func openDatabase(path string) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 	_, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS servers(id INTEGER PRIMARY KEY,name TEXT NOT NULL,host TEXT NOT NULL,port INTEGER NOT NULL,user TEXT NOT NULL,identity TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS server_ssh_keys(server_id INTEGER PRIMARY KEY,protected_seed BLOB NOT NULL,host_key BLOB NOT NULL);
+ CREATE TABLE IF NOT EXISTS server_enrollments(token_hash TEXT PRIMARY KEY,owner TEXT NOT NULL,connection_hash TEXT NOT NULL,host_key BLOB NOT NULL,expires_at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS samples(server_id INTEGER NOT NULL,at TEXT NOT NULL,cpu REAL,memory REAL,disk REAL,uptime REAL,rx REAL,tx REAL);
  CREATE INDEX IF NOT EXISTS samples_lookup ON samples(server_id,at);
  CREATE INDEX IF NOT EXISTS samples_retention ON samples(at);
- CREATE TABLE IF NOT EXISTS auth_credentials(id INTEGER PRIMARY KEY CHECK(id=1),password_hash TEXT NOT NULL,updated_at INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS auth_identity(id INTEGER PRIMARY KEY CHECK(id=1),handle BLOB NOT NULL);
+ CREATE TABLE IF NOT EXISTS auth_passkeys(id TEXT PRIMARY KEY,rp_id TEXT NOT NULL,name TEXT NOT NULL,credential TEXT NOT NULL,created_at INTEGER NOT NULL,last_used_at INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS auth_ceremonies(token_hash TEXT PRIMARY KEY,kind TEXT NOT NULL,origin TEXT NOT NULL,binding TEXT NOT NULL,session TEXT NOT NULL,remember INTEGER NOT NULL,name TEXT NOT NULL,expires_at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,remember INTEGER NOT NULL,created_at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS auth_throttle(id INTEGER PRIMARY KEY CHECK(id=1),failures INTEGER NOT NULL,window_start INTEGER NOT NULL,blocked_until INTEGER NOT NULL);
  INSERT OR IGNORE INTO auth_throttle VALUES(1,0,0,0);
@@ -53,11 +57,24 @@ func openDatabase(path string) (*sql.DB, error) {
  CREATE TABLE IF NOT EXISTS native_swarm_apps(server_id INTEGER NOT NULL,service_name TEXT NOT NULL,operation_id TEXT NOT NULL,connection_hash TEXT NOT NULL,protected_key BLOB NOT NULL,definition BLOB NOT NULL,stage TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(server_id,service_name));
  CREATE TABLE IF NOT EXISTS github_connection(id INTEGER PRIMARY KEY CHECK(id=1),login TEXT NOT NULL,protected_key BLOB NOT NULL,secret BLOB NOT NULL);
  CREATE TABLE IF NOT EXISTS github_deployments(id TEXT PRIMARY KEY,server_id INTEGER NOT NULL,connection_hash TEXT NOT NULL,details TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS terminal_sessions(id TEXT PRIMARY KEY,server_id INTEGER NOT NULL,kind TEXT NOT NULL,connection_hash TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(server_id,kind));`)
+ CREATE TABLE IF NOT EXISTS terminal_sessions(id TEXT PRIMARY KEY,server_id INTEGER NOT NULL,kind TEXT NOT NULL,connection_hash TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(server_id,kind));
+ CREATE TABLE IF NOT EXISTS terminal_workspace_sessions(id TEXT PRIMARY KEY,server_id INTEGER NOT NULL,kind TEXT NOT NULL,connection_hash TEXT NOT NULL,directory TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(server_id,kind,directory));`)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
 
+	// One-time removal of the previous access schema also revokes its sessions.
+	var previous bool
+	if err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='auth_credentials')").Scan(&previous); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if previous {
+		if _, err = db.Exec("BEGIN; DELETE FROM auth_sessions; DROP TABLE auth_credentials; COMMIT;"); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return db, nil
 }
