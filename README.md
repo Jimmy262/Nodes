@@ -40,7 +40,7 @@ Para conexiones existentes, abre **GitHub → Configurar despliegue por push →
 
 Puedes **Actualizar repositorios** y **Actualizar token** sin desconectar la cuenta. La lista también se recarga al crear una aplicación y al volver a la pestaña. Si falta un repositorio, pega su URL en el buscador para comprobar su acceso. Los tokens granulares limitados a repositorios concretos necesitan que autorices los nuevos en GitHub; actualizar la lista no modifica esos permisos.
 
-**Actualizaciones**, encima de **Apariencia**, reúne las aplicaciones vinculadas a GitHub y muestra su servidor y rama. Selecciona **Revisar actualización** para comprobar el commit antes de desplegarlo por SSH. El resultado se registra en **Actividad**.
+**Actualizar Nodes**, encima de **Apariencia**, consulta las versiones del panel publicadas en GitHub. En Linux, las instalaciones hechas con el instalador de systemd pueden aplicar una versión nueva desde ese diálogo. Las aplicaciones externas se siguen actualizando desde su propia ficha.
 
 - Despliegues desde ZIP y repositorios GitHub, con revisión previa, variables de entorno y configuración de dominios.
 - Biblioteca Compose con PostgreSQL, Redis, n8n y Supabase, con credenciales generadas para cada instalación.

@@ -121,6 +121,8 @@ func (a *App) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("GET /api/auth/passkeys", a.listPasskeys)
 	mux.HandleFunc("DELETE /api/auth/passkeys/{id}", a.deletePasskey)
 	mux.HandleFunc("GET /api/session", a.authStatus)
+	mux.HandleFunc("GET /api/nodes-update", a.nodesUpdateStatus)
+	mux.HandleFunc("POST /api/nodes-update", a.limitPreparation(a.requestNodesUpdate))
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("POST /api/auth/logout-all", a.logoutAll)
 	mux.HandleFunc("GET /api/servers", a.list)

@@ -30,6 +30,7 @@
   import OperationDialog from './OperationDialog.svelte';
   import DeploymentDialog from './DeploymentDialog.svelte';
   import GithubDialog from './GithubDialog.svelte';
+  import NodesUpdateDialog from './NodesUpdateDialog.svelte';
   import GithubApplicationUpdate from './GithubApplicationUpdate.svelte';
   import ComposeLibrary from './ComposeLibrary.svelte';
   import OperationsHistory from './OperationsHistory.svelte';
@@ -387,10 +388,10 @@
         <button
           class="appearance-shortcut"
           type="button"
-          aria-label="Actualizar servicios desde GitHub"
-          title="Actualizar servicios desde GitHub"
-          on:click={() => (operation = { kind: 'github', updatesOnly: true })}
-          ><RefreshCw size={17} /><span class="appearance-label">Actualizaciones</span></button
+          aria-label="Actualizaciones de Nodes"
+          title="Actualizaciones de Nodes"
+          on:click={() => (operation = { kind: 'nodes-update' })}
+          ><RefreshCw size={17} /><span class="appearance-label">Actualizar Nodes</span></button
         >
         <ThemeControl />
         <button
@@ -793,9 +794,9 @@
       }}
       onUpdated={refresh}
     />
+  {:else if operation?.kind === 'nodes-update'}<NodesUpdateDialog {api} onClose={() => (operation = null)} />
   {:else if operation?.kind === 'github'}<GithubDialog
       sourceId={operation.sourceId}
-      updatesOnly={operation.updatesOnly}
       {api}
       {servers}
       onClose={() => (operation = null)}
