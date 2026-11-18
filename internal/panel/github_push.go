@@ -25,16 +25,6 @@ type githubSecretsKey struct {
 	Key string `json:"key"`
 }
 
-func removeManualSecretsWarning(warnings []string) []string {
-	out := []string{}
-	for _, warning := range warnings {
-		if !strings.HasPrefix(warning, "Necesitarás configurar los secretos SSH") {
-			out = append(out, warning)
-		}
-	}
-	return out
-}
-
 func (a *App) githubSecretsKey(ctx context.Context, token []byte, d githubDeployment) (githubSecretsKey, error) {
 	var key githubSecretsKey
 	if err := a.githubAPI(ctx, token, "GET", "/repos/"+d.Repository+"/actions/secrets/public-key", nil, &key); err != nil {
@@ -84,7 +74,7 @@ func (a *App) githubPushPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	p := &operationPlan{Kind: "github-push", Name: d.Name, Source: s.Name, Manager: "GitHub Actions", server: s,
 		Summary:  []string{"Activar despliegue automático para " + d.Repository + " · rama " + d.Branch, "Se generará una clave SSH exclusiva y limitada al ejecutor de esta aplicación.", "Se configurarán los cinco secretos de Actions y se publicará el workflow."},
-		Warnings: []string{"La clave exclusiva se guardará cifrada en GitHub Secrets; tu clave SSH personal no se subirá.", "Quien pueda ejecutar workflows con estos secretos podrá desplegar código en este servidor. Solo concede escritura a personas de confianza.", "Después de activar, vuelve a ejecutar el workflow fallido o haz push a la rama configurada."}, Blockers: []string{}, github: &githubDeploymentPlan{deployment: d}}
+		Warnings: []string{"La clave exclusiva se guardará cifrada en GitHub Secrets; tu clave SSH personal no se subirá.", "Quien pueda ejecutar workflows con estos secretos podrá desplegar código en este servidor. Solo concede escritura a personas de confianza."}, Blockers: []string{}, Workflow: githubWorkflow(d), github: &githubDeploymentPlan{deployment: d}}
 	a.savePlan(w, r, p)
 }
 
@@ -247,12 +237,6 @@ func (a *App) configureGithubPush(ctx context.Context, p *operationPlan, token [
 	if err = a.authorizeGithubKey(ctx, p.server, d, "retain", payload); err != nil {
 		return errors.New("Los secretos están configurados, pero no se pudieron retirar claves anteriores. Vuelve a activar para completar la limpieza")
 	}
-	d.PushConfigured = true
-	raw, _ := json.Marshal(d)
-	if _, err = a.db.Exec("UPDATE github_deployments SET details=? WHERE id=?", string(raw), d.ID); err != nil {
-		return errors.New("Los secretos están configurados, pero no se pudo guardar su estado en Nodes")
-	}
-	p.github.deployment = d
 	return nil
 }
 
@@ -265,5 +249,15 @@ func (a *App) runGithubPush(ctx context.Context, p *operationPlan) error {
 	if err = a.configureGithubPush(ctx, p, token); err != nil {
 		return err
 	}
-	return a.publishGithubWorkflow(ctx, token, p.github.deployment)
+	d := p.github.deployment
+	a.operationState(p, "running", "Publicando el workflow de GitHub Actions…")
+	if err = a.publishGithubWorkflow(ctx, token, d); err != nil {
+		return err
+	}
+	d.PushConfigured = true
+	raw, _ := json.Marshal(d)
+	if _, err = a.db.Exec("UPDATE github_deployments SET details=? WHERE id=?", string(raw), d.ID); err != nil {
+		return errors.New("El workflow está publicado, pero no se pudo guardar su estado en Nodes")
+	}
+	return nil
 }

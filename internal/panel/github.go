@@ -25,7 +25,9 @@ var githubDeployer []byte
 
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$`)
 var githubBranchPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$`)
+var githubCommitPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
 var githubBinding = Server{Host: "api.github.com", User: "github-token"}
+var errGithubNotFound = errors.New("GitHub no encontró el repositorio, rama o workflow. Revisa el nombre y los permisos del token")
 
 type githubDeployment struct {
 	PushConfigured bool   `json:"pushConfigured"`
@@ -41,10 +43,9 @@ type githubDeployment struct {
 	URL            string `json:"url,omitempty"`
 }
 type githubDeploymentPlan struct {
-	automaticPush bool
-	deployment    githubDeployment
-	policy        []byte
-	commit        string
+	deployment githubDeployment
+	policy     []byte
+	commit     string
 }
 
 type githubRepositoryInfo struct {
@@ -115,7 +116,7 @@ func githubError(status int) error {
 	case 403, 429:
 		return errors.New("GitHub rechazó los permisos o alcanzó su límite de solicitudes. Revisa el token y la autorización de la organización")
 	case 404:
-		return errors.New("GitHub no encontró el repositorio, rama o workflow. Revisa el nombre y los permisos del token")
+		return errGithubNotFound
 	case 409, 422:
 		return errors.New("GitHub no pudo guardar o ejecutar el workflow. Revisa la rama, las reglas del repositorio y que el workflow esté en la rama predeterminada para ejecución manual")
 	default:
@@ -261,25 +262,42 @@ func (a *App) githubRepositoryAccess(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, repo)
 }
 
-func (a *App) githubArchive(ctx context.Context, token []byte, repo, branch, buildPath, composeFile string) (*zipProject, error) {
-	data, err := a.githubProjectArchive(ctx, token, repo, branch, buildPath)
+type githubArchive struct {
+	*zipProject
+	commit string
+}
+
+func (a *App) githubArchive(ctx context.Context, token []byte, repo, branch, buildPath, composeFile string) (*githubArchive, error) {
+	commit, err := a.githubBranchCommit(ctx, token, repo, branch)
 	if err != nil {
 		return nil, err
 	}
-	return inspectZipWithCompose(data, 8080, 80, composeFile)
+	data, err := a.githubProjectArchive(ctx, token, repo, commit, buildPath)
+	if err != nil {
+		return nil, err
+	}
+	project, err := inspectZipWithCompose(data, 8080, 80, composeFile)
+	if err != nil {
+		return nil, err
+	}
+	return &githubArchive{zipProject: project, commit: commit}, nil
 }
 
-func (a *App) githubProjectArchive(ctx context.Context, token []byte, repo, branch, buildPath string) ([]byte, error) {
+func (a *App) githubBranchCommit(ctx context.Context, token []byte, repo, branch string) (string, error) {
 	var commit struct {
 		SHA string `json:"sha"`
 	}
 	if e := a.githubAPI(ctx, token, "GET", "/repos/"+repo+"/commits/"+url.PathEscape(branch), nil, &commit); e != nil {
-		return nil, e
+		return "", e
 	}
-	if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(commit.SHA) {
-		return nil, errors.New("Commit GitHub inválido")
+	if !githubCommitPattern.MatchString(commit.SHA) {
+		return "", errors.New("Commit GitHub inválido")
 	}
-	res, e := a.githubRequest(ctx, token, "GET", "/repos/"+repo+"/zipball/"+commit.SHA, nil)
+	return commit.SHA, nil
+}
+
+func (a *App) githubProjectArchive(ctx context.Context, token []byte, repo, commit, buildPath string) ([]byte, error) {
+	res, e := a.githubRequest(ctx, token, "GET", "/repos/"+repo+"/zipball/"+commit, nil)
 	if e != nil {
 		return nil, e
 	}
@@ -379,7 +397,7 @@ func (a *App) githubPlan(w http.ResponseWriter, r *http.Request) {
 		Port          int        `json:"port"`
 		HostPort      int        `json:"hostPort"`
 		HTTPS         bool       `json:"https"`
-		AutomaticPush bool       `json:"automaticPush"`
+		AutomaticPush bool       `json:"automaticPush"` // Accepted for clients cached before push became a separate step.
 		Environment   []envValue `json:"environment"`
 	}
 	// Environment values can legitimately exceed the general 8 KiB request limit.
@@ -423,11 +441,12 @@ func (a *App) githubPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(token)
-	z, e := a.githubArchive(r.Context(), token, in.Repository, in.Branch, in.BuildPath, in.ComposeFile)
+	archive, e := a.githubArchive(r.Context(), token, in.Repository, in.Branch, in.BuildPath, in.ComposeFile)
 	if e != nil {
 		fail(w, 400, e.Error())
 		return
 	}
+	z, commit := archive.zipProject, archive.commit
 	if in.Service == "" {
 		in.Service = githubDefaultService(z)
 	}
@@ -450,10 +469,13 @@ func (a *App) githubPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "No se pudo preparar el despliegue")
 		return
 	}
-	deployment := githubDeployment{ID: id, ServerID: s.ID, Name: in.Name, Repository: in.Repository, Branch: in.Branch, BuildPath: in.BuildPath, Project: in.Name + "-" + id[:8], Workflow: "nodo-" + id[:12] + ".yml", SecretPrefix: "NODO_" + strings.ToUpper(id[:8])}
-	p := &operationPlan{ID: id, Kind: "github-setup", Name: in.Name, Source: s.Name, Manager: "GitHub Actions", server: s, project: deployment.Project, Summary: []string{"Repositorio: " + in.Repository + " · rama " + in.Branch, "Se instalará el ejecutor de Nodo en la VPS y se publicará .github/workflows/" + deployment.Workflow, "Cada push desplegará este proyecto, conservando su nombre y sus volúmenes Docker."}, Warnings: []string{"El código de esta rama se ejecutará en tu servidor. Solo concede escritura en el repositorio a personas de confianza.", "Necesitarás configurar los secretos SSH en GitHub. Publicar el workflow puede iniciar un primer intento antes de configurar esos secretos; se puede volver a ejecutar después.", "Los cambios futuros del Compose también se aplicarán. Un fallo puede dejar servicios parcialmente actualizados; no se revierte ni se borran volúmenes automáticamente."}, Blockers: []string{}}
+	buildPath := path.Join(in.BuildPath, z.root)
+	deployment := githubDeployment{ID: id, ServerID: s.ID, Name: in.Name, Repository: in.Repository, Branch: in.Branch, BuildPath: buildPath, Project: in.Name + "-" + id[:8], Workflow: "nodo-" + id[:12] + ".yml", SecretPrefix: "NODO_" + strings.ToUpper(id[:8])}
+	p := &operationPlan{ID: id, Kind: "github-setup", Name: in.Name, Source: s.Name, Manager: "GitHub · Nodes", server: s, project: deployment.Project,
+		Summary:  []string{"Repositorio: " + in.Repository + " · rama " + in.Branch, "Commit: " + commit, "Se instalará el ejecutor de Nodes y se desplegará el commit revisado."},
+		Warnings: []string{"El código del repositorio se ejecutará en esta VPS.", "Un fallo puede dejar servicios parcialmente actualizados; no se revierten cambios automáticamente."}, Blockers: []string{}}
 	p.Summary = append(p.Summary, fmt.Sprintf("Servicio público: %s · puerto interno %d", in.Service, in.Port))
-	p.Review = &operationReview{Summary: []string{fmt.Sprintf("Servicio %s · puerto interno %d", in.Service, in.Port)}, Warnings: []string{"El código del repositorio se ejecutará en esta VPS.", "Una actualización fallida puede quedar parcial; no se revierte automáticamente."}}
+	p.Review = &operationReview{Summary: []string{"Commit: " + commit[:12], fmt.Sprintf("Servicio %s · puerto interno %d", in.Service, in.Port)}, Warnings: p.Warnings}
 	if !z.dockerfile {
 		p.Review.Summary = append(p.Review.Summary, "Archivo Compose: "+z.compose)
 	}
@@ -482,26 +504,12 @@ func (a *App) githubPlan(w http.ResponseWriter, r *http.Request) {
 		labels[name] = routing
 	}
 	composeName := path.Base(z.compose)
-	policy := map[string]any{"project": deployment.Project, "repository": in.Repository, "branch": in.Branch, "buildPath": in.BuildPath, "compose": composeName, "dockerfile": z.dockerfile, "service": in.Service, "port": in.Port, "hostPort": in.HostPort, "environment": env, "labels": labels, "proxy": p.access != nil}
+	policy := map[string]any{"project": deployment.Project, "repository": in.Repository, "branch": in.Branch, "buildPath": buildPath, "compose": composeName, "dockerfile": z.dockerfile, "service": in.Service, "port": in.Port, "hostPort": in.HostPort, "environment": env, "labels": labels, "proxy": p.access != nil}
 	if p.access != nil {
 		policy["network"] = p.access.Proxy.Network
 	}
 	raw, _ := json.Marshal(policy)
-	p.github = &githubDeploymentPlan{deployment: deployment, policy: raw}
-	p.github.automaticPush = in.AutomaticPush
-	if in.AutomaticPush {
-		if _, e = a.githubSecretsKey(r.Context(), token, deployment); e != nil {
-			fail(w, 400, e.Error())
-			return
-		}
-		p.Summary = append(p.Summary, "Se configurarán automáticamente los secretos de Actions con una clave SSH exclusiva; tu clave personal no se subirá a GitHub.")
-		p.Warnings = append(p.Warnings, "Quien pueda ejecutar workflows con estos secretos podrá desplegar código en el servidor.")
-		p.Warnings = removeManualSecretsWarning(p.Warnings)
-		p.Review.Summary = append(p.Review.Summary, "Se creará una clave SSH exclusiva y se subirán los secretos cifrados a GitHub para activar los pushes.")
-		p.Review.Warnings = removeManualSecretsWarning(p.Review.Warnings)
-		p.Review.Warnings = append(p.Review.Warnings, "La clave exclusiva quedará en GitHub Secrets; tu clave SSH personal permanece en tu PC.")
-	}
-	p.Workflow = githubWorkflow(deployment)
+	p.github = &githubDeploymentPlan{deployment: deployment, policy: raw, commit: commit}
 	if _, e = a.run(r.Context(), s, `docker info >/dev/null && docker compose version >/dev/null && command -v tar >/dev/null && python3 -c 'import sys, fcntl, tarfile, json, pathlib, yaml; assert sys.version_info >= (3, 10); assert hasattr(yaml, "SafeLoader")' && docker compose config --help | grep -q -- --no-path-resolution && docker compose up --help | grep -q -- --wait-timeout`); e != nil {
 		p.Blockers = append(p.Blockers, "La VPS necesita Docker Compose v2 reciente, tar, Python 3.10 o posterior y PyYAML (SafeLoader) accesibles por SSH.")
 	}
@@ -514,13 +522,9 @@ func (a *App) runGithubSetup(ctx context.Context, p *operationPlan) error {
 	}
 	g := p.github
 	d := g.deployment
-	token, e := a.githubToken()
-	if e != nil {
-		return e
-	}
-	defer clear(token)
 	a.operationState(p, "running", "Instalando el ejecutor de Nodo y su configuración privada en la VPS…")
 	var upload bytes.Buffer
+	var e error
 	tw := tar.NewWriter(&upload)
 	for _, f := range []struct {
 		name string
@@ -544,16 +548,7 @@ func (a *App) runGithubSetup(ctx context.Context, p *operationPlan) error {
 	if _, e = a.db.Exec("INSERT INTO github_deployments VALUES(?,?,?,?)", d.ID, d.ServerID, connectionHash(p.server), string(raw)); e != nil {
 		return errors.New("El ejecutor se instaló, pero no se pudo guardar la conexión local")
 	}
-	a.operationState(p, "running", "Publicando el workflow en la rama seleccionada de GitHub…")
-	if g.automaticPush {
-		if e = a.configureGithubPush(ctx, p, token); e != nil {
-			return e
-		}
-	}
-	if e = a.publishGithubWorkflow(ctx, token, d); e != nil {
-		return fmt.Errorf("La VPS está preparada. %s. Puedes reintentar Publicar workflow en GitHub desde Nodo", e)
-	}
-	return nil
+	return a.runGithubDeploy(ctx, p)
 }
 func (a *App) githubDeployment(r *http.Request) (githubDeployment, error) {
 	var d githubDeployment
@@ -651,15 +646,9 @@ func (a *App) githubDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(token)
-	var commit struct {
-		SHA string `json:"sha"`
-	}
-	if e = a.githubAPI(r.Context(), token, "GET", "/repos/"+d.Repository+"/commits/"+url.PathEscape(d.Branch), nil, &commit); e != nil {
+	commit, e := a.githubBranchCommit(r.Context(), token, d.Repository, d.Branch)
+	if e != nil {
 		fail(w, 502, e.Error())
-		return
-	}
-	if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(commit.SHA) {
-		fail(w, 502, "Commit GitHub inválido")
 		return
 	}
 	s, e := a.serverByID(d.ServerID)
@@ -667,7 +656,7 @@ func (a *App) githubDispatch(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Servidor no encontrado")
 		return
 	}
-	p := &operationPlan{Kind: "github-deploy", Name: d.Name, Source: s.Name, Manager: "GitHub · Nodo", server: s, URL: d.URL, Summary: []string{"Repositorio: " + d.Repository + " · rama " + d.Branch, "Commit: " + commit.SHA, "Se reconstruirán los servicios modificados en el proyecto " + d.Project + ". Se conservan sus volúmenes."}, Warnings: []string{"Los servicios pueden interrumpirse mientras se actualizan. Si falla, revisa el resultado antes de reintentar.", "Mantén Nodo abierto hasta que termine este despliegue manual."}, Blockers: []string{}, github: &githubDeploymentPlan{deployment: d, commit: commit.SHA}}
+	p := &operationPlan{Kind: "github-deploy", Name: d.Name, Source: s.Name, Manager: "GitHub · Nodes", server: s, URL: d.URL, Summary: []string{"Repositorio: " + d.Repository + " · rama " + d.Branch, "Commit: " + commit, "Se reconstruirán los servicios modificados en el proyecto " + d.Project + ". Se conservan sus volúmenes."}, Warnings: []string{"Los servicios pueden interrumpirse mientras se actualizan. Si falla, revisa el resultado antes de reintentar."}, Blockers: []string{}, github: &githubDeploymentPlan{deployment: d, commit: commit}}
 	a.savePlan(w, r, p)
 }
 
@@ -733,7 +722,7 @@ func (a *App) githubRuns(w http.ResponseWriter, r *http.Request) {
 		} `json:"workflow_runs"`
 	}
 	e = a.githubAPI(r.Context(), token, "GET", "/repos/"+d.Repository+"/actions/workflows/"+d.Workflow+"/runs?per_page=10&branch="+url.QueryEscape(d.Branch), nil, &raw)
-	if e != nil {
+	if e != nil && !(errors.Is(e, errGithubNotFound) && !d.PushConfigured) {
 		fail(w, 502, e.Error())
 		return
 	}

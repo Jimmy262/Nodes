@@ -32,7 +32,7 @@
   const labels = {
     'terminal-install': 'Instalar requisito de terminal',
     'template-deploy': 'Desplegar plantilla Compose',
-    'github-setup': 'Conectar despliegue GitHub',
+    'github-setup': 'Primer despliegue desde GitHub',
     'github-deploy': 'Desplegar commit GitHub',
     delete: 'Eliminar contenedor',
     migrate: 'Trasladar contenedor',

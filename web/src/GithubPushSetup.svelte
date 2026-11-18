@@ -2,8 +2,8 @@
   import { Copy, Check, ExternalLink } from '@lucide/svelte';
   export let deployment;
   export let server;
-  export let open = false;
   export let pending = false;
+  export let permissionError = '';
   export let onPublish;
   export let onActivate;
   let copied = '',
@@ -26,22 +26,24 @@
   }
 </script>
 
-<details class="gh-push-setup" {open}>
-  <summary>Configurar despliegue por push <span>Solo una vez</span></summary>
-  <p>
-    {deployment.pushConfigured
-      ? 'Nodes ya configuró los secretos SSH de este despliegue.'
-      : 'Activa la configuración automática para que los pushes desplieguen sin completar secretos a mano.'}
-  </p>
-  <button type="button" class="primary" disabled={pending} on:click={() => onActivate(deployment)}
-    >{deployment.pushConfigured
-      ? 'Renovar configuración automática'
-      : 'Activar despliegue automático'}</button
-  >
-  <p class="small muted">
-    Se genera una clave exclusiva, limitada al ejecutor de esta aplicación. Tu clave SSH personal
-    permanece en tu PC. El token de GitHub necesita permiso Secrets: lectura y escritura.
-  </p>
+<section class="gh-push-setup" aria-label={`Despliegue por push de ${deployment.name}`}>
+  <div class="gh-field-heading">
+    <strong>Despliegue por push</strong>
+    <small>{deployment.pushConfigured ? 'Configurado en Nodes' : 'Opcional'}</small>
+  </div>
+  {#if deployment.pushConfigured}
+    <p>Los pushes a <code>{deployment.branch}</code> inician el despliegue.</p>
+    <a class="text-button" href={`https://github.com/${deployment.repository}/actions/workflows/${deployment.workflow}`} target="_blank" rel="noopener noreferrer">Abrir workflow en GitHub <ExternalLink size={14} /></a>
+  {:else}
+    <p>Los pushes a <code>{deployment.branch}</code> pueden desplegar esta aplicación con GitHub Actions.</p>
+    <button type="button" class="secondary" disabled={pending} on:click={() => onActivate(deployment)}>Activar despliegue automático</button>
+  {/if}
+  {#if permissionError}
+    <div class="notice warning" role="alert">
+      <p>{permissionError}</p>
+      <a class="text-button" href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener noreferrer">Revisar permisos del token <ExternalLink size={14} /></a>
+    </div>
+  {/if}
   <details class="gh-inline-help">
     <summary>Configuración manual alternativa</summary>
     <ol class="gh-setup-steps">
@@ -93,6 +95,7 @@
   </details>
   <details class="gh-inline-help">
     <summary>Workflow y conexión</summary>
+    {#if deployment.pushConfigured}<button type="button" class="secondary" disabled={pending} on:click={() => onActivate(deployment)}>Renovar configuración automática</button>{/if}
     <p><code>.github/workflows/{deployment.workflow}</code></p>
     <p>
       HOST debe ser una IP o dominio accesible desde GitHub; el alias SSH de tu PC no sirve. HOST,
@@ -106,4 +109,4 @@
       on:click={() => onPublish(deployment)}>Volver a publicar workflow</button
     >
   </details>
-</details>
+</section>

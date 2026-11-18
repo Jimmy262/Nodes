@@ -2585,9 +2585,12 @@ dd {
 .gh-app-heading p { margin: 6px 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .gh-app-heading small { color: var(--muted); font-size: 11px; }
 .gh-app-heading + .button-row { margin-top: 14px; }
-.gh-push-setup { margin-top: 15px; border-top: 1px solid var(--line); }
-.gh-push-setup > summary { cursor: pointer; padding: 12px 0; font-size: 12px; }
-.gh-push-setup > summary > span { font-size: 10px; color: var(--muted); margin-left: 7px; }
+.gh-push-setup { margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; }
+.gh-push-setup > p { margin: 6px 0 10px; }
+.gh-push-setup .notice, .gh-review .notice { overflow-wrap: anywhere; }
+.gh-review .notice p { margin: 0 0 6px; }
+.gh-review .notice p:last-child { margin-bottom: 0; }
+.gh-review .notice .button-row { flex-wrap: wrap; }
 .gh-setup-steps { padding-left: 20px; margin: 8px 0 16px; font-size: 12px; }
 .gh-setup-steps > li { padding-left: 4px; margin-bottom: 18px; line-height: 1.6; }
 .gh-setup-steps p { margin: 6px 0 10px; color: var(--muted); }
