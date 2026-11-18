@@ -336,10 +336,14 @@ func (a *App) prepareAccess(ctx context.Context, p *operationPlan, mode, domain,
 	if secure && !dns.Ready {
 		p.Blockers = append(p.Blockers, "Para activar HTTPS, primero conecta el DNS y vuelve a comprobarlo.")
 	}
-	used, e := a.domainInUse(ctx, p.server, domain)
+	used := false
+	var e error
+	if !editingCurrentDomain(p, domain) {
+		used, e = a.domainInUse(ctx, p.server, domain)
+	}
 	if e != nil {
 		p.Blockers = append(p.Blockers, e.Error())
-	} else if used {
+	} else if used && !editingCurrentDomain(p, domain) {
 		p.Blockers = append(p.Blockers, "Ese dominio ya está configurado en este servidor. Escoge otro para evitar sustituir una aplicación.")
 	}
 	p.Summary = append(p.Summary, "Servicio público: "+service+" · puerto interno "+strconv.Itoa(port))
@@ -357,17 +361,34 @@ func (a *App) recheckAccess(ctx context.Context, p *operationPlan) error {
 	if !current.Available || current.Network != old.Network || current.HTTPEntry != old.HTTPEntry || current.HTTPSEntry != old.HTTPSEntry || current.Resolver != old.Resolver || current.PublicIP != old.PublicIP {
 		return errors.New("La configuración del proxy cambió. Vuelve a revisar el despliegue")
 	}
-	used, e := a.domainInUse(ctx, p.server, p.access.Domain)
+	used := false
+	var e error
+	if !editingCurrentDomain(p, p.access.Domain) {
+		used, e = a.domainInUse(ctx, p.server, p.access.Domain)
+	}
 	if e != nil {
 		return e
 	}
-	if used {
+	if used && !editingCurrentDomain(p, p.access.Domain) {
 		return errors.New("El dominio se ocupó después de la revisión. No se ha desplegado la aplicación")
 	}
 	if p.access.HTTPS && !checkDomainDNS(ctx, p.access.Domain, current.PublicIP).Ready {
 		return errors.New("El DNS cambió o todavía no coincide. Vuelve a revisar el dominio")
 	}
 	return nil
+}
+
+func editingCurrentDomain(p *operationPlan, host string) bool {
+	if p.edit == nil || p.edit.input.Domain == nil {
+		return false
+	}
+	d := p.edit.input.Domain
+	for _, existing := range p.edit.before.Domains {
+		if d.ID == existing.ID && !d.Remove && !d.Automatic && strings.EqualFold(existing.Host, host) {
+			return true
+		}
+	}
+	return false
 }
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)

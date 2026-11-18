@@ -1,4 +1,4 @@
-"""Nodo's VPS executor. Standard-library only; Docker Compose provides YAML parsing.
+"""Nodo's VPS executor. PyYAML validates input before Docker Compose reads files.
 
 Receives a GitHub tarball over SSH stdin. Credentials and application values never
 go to stdout. Release directories and diagnostics are private to the SSH user.
@@ -16,6 +16,7 @@ import tarfile
 import time
 import traceback
 import uuid
+import yaml
 
 
 def require(condition, message):
@@ -86,11 +87,109 @@ def extract(stream, destination, subdir):
     require(seen, "La carpeta del proyecto está vacía")
 
 
-def validate(config, project):
+class BoundedLoader(yaml.SafeLoader):
+    # Compose uses YAML 1.2 booleans. PyYAML's YAML 1.1 defaults otherwise
+    # turn ordinary environment keys such as ON/OFF into non-string keys.
+    yaml_implicit_resolvers = {
+        first: [(tag, pattern) for tag, pattern in resolvers
+                if tag not in ('tag:yaml.org,2002:bool', 'tag:yaml.org,2002:timestamp')]
+        for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self.node_count = 0
+        self.node_depth = 0
+        self.checked_mappings = set()
+
+    def compose_node(self, parent, index):
+        self.node_count += 1
+        self.node_depth += 1
+        require(self.node_count <= 20000 and self.node_depth <= 64,
+                "Compose supera los límites de complejidad")
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self.node_depth -= 1
+
+    def check_mapping_keys(self, node):
+        if id(node) in self.checked_mappings:
+            return
+        keys = set()
+        for key_node, _ in node.value:
+            if key_node.tag == 'tag:yaml.org,2002:merge':
+                continue
+            require(isinstance(key_node, yaml.ScalarNode) and
+                    key_node.tag == 'tag:yaml.org,2002:str' and key_node.value not in keys,
+                    "Compose contiene claves inválidas o duplicadas")
+            keys.add(key_node.value)
+        self.checked_mappings.add(id(node))
+
+    def construct_mapping(self, node, deep=False):
+        self.check_mapping_keys(node)
+        self.flatten_mapping(node)
+        result = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            require(isinstance(key, str), "Compose contiene claves inválidas")
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
+BoundedLoader.add_implicit_resolver('tag:yaml.org,2002:bool',
+                                  re.compile(r'^(?:true|True|TRUE|false|False|FALSE)$'), list('tTfF'))
+
+
+def load_definition(definition):
+    with definition.open('rb') as source:
+        data = source.read(2 * 1024 * 1024 + 1)
+    require(len(data) <= 2 * 1024 * 1024, "Compose demasiado grande")
+    loader = BoundedLoader(data)
+    try:
+        node = loader.get_single_node()
+        active = set()
+        references = 0
+        def check(current, depth=0):
+            nonlocal references
+            references += 1
+            require(depth <= 64 and references <= 50000 and id(current) not in active,
+                    "Compose contiene ciclos o supera los límites de complejidad")
+            active.add(id(current))
+            try:
+                if isinstance(current, yaml.MappingNode):
+                    # Check original keys before flatten_mapping mutates any
+                    # shared anchor. Explicit keys may override merged keys.
+                    loader.check_mapping_keys(current)
+                    for key, value in current.value:
+                        check(key, depth + 1)
+                        check(value, depth + 1)
+                elif isinstance(current, yaml.SequenceNode):
+                    for value in current.value:
+                        check(value, depth + 1)
+            finally:
+                active.remove(id(current))
+        require(node is not None, "Compose vacío")
+        check(node)
+        config = loader.construct_document(node)
+        require(isinstance(config, dict), "Compose inválido")
+        return config
+    finally:
+        loader.dispose()
+
+
+def project_relative(value):
+    return relative(value) and not value.startswith("~")
+
+
+def validate(config, project, raw=False):
+    require(isinstance(config, dict), "Compose inválido")
+    require(not any(key in config for key in ("include", "extends")),
+            "Incluye todos los servicios en un único Compose")
     services = config.get("services", {})
-    require(0 < len(services) <= 50, "Compose debe definir de 1 a 50 servicios")
+    require(isinstance(services, dict) and 0 < len(services) <= 50, "Compose debe definir de 1 a 50 servicios")
     for service in services.values():
-        for key in ("container_name", "network_mode", "pid", "ipc", "uts", "userns_mode",
+        require(isinstance(service, dict), "Servicio inválido")
+        for key in ("extends", "label_file", "container_name", "network_mode", "pid", "ipc", "uts", "userns_mode",
                     "devices", "device_cgroup_rules", "volumes_from", "external_links",
                     "cap_add", "post_start", "pre_stop", "develop", "provider", "profiles",
                     "gpus", "use_api_socket"):
@@ -98,15 +197,32 @@ def validate(config, project):
         require(not service.get("privileged"), "No se permiten contenedores privilegiados")
         build = service.get("build")
         if build:
+            if raw and isinstance(build, str):
+                build = {"context": build}
             require(isinstance(build, dict), "Build inválido")
-            require(relative(build.get("context", ".")), "El build debe estar dentro del proyecto")
-            require(relative(build.get("dockerfile", "Dockerfile")), "Dockerfile fuera del proyecto")
+            require(project_relative(build.get("context", ".")), "El build debe estar dentro del proyecto")
+            require(project_relative(build.get("dockerfile", "Dockerfile")), "Dockerfile fuera del proyecto")
             for key in ("additional_contexts", "ssh", "entitlements", "network", "secrets"):
                 require(not build.get(key), "Opción de build no admitida: " + key)
+        files = service.get("env_file", [])
+        if not isinstance(files, list):
+            files = [files]
+        for entry in files:
+            filename = entry.get("path") if isinstance(entry, dict) else entry
+            require(project_relative(filename), "env_file fuera del proyecto")
         for mount in service.get("volumes", []):
+            if raw and isinstance(mount, str):
+                parts = mount.split(":")
+                require(len(parts) <= 3 and (len(parts) == 1 or project_relative(parts[0])),
+                        "Montaje fuera del proyecto")
+                continue
+            require(isinstance(mount, dict), "Montaje inválido")
             require(mount.get("type") in ("volume", "bind", "tmpfs"), "Montaje no admitido")
-            require(relative(mount.get("source", ".")), "Montaje fuera del proyecto")
-        for network in (service.get("networks") or {}).values():
+            require(project_relative(mount.get("source", ".")), "Montaje fuera del proyecto")
+        networks = service.get("networks") or {}
+        if raw and isinstance(networks, list):
+            networks = {key: None for key in networks}
+        for network in networks.values():
             require(not network or not (network.get("ipv4_address") or network.get("ipv6_address")),
                     "No se admiten direcciones de red fijas")
     for kind in ("volumes", "networks", "secrets", "configs"):
@@ -118,7 +234,7 @@ def validate(config, project):
                     "No se admiten nombres globales de recursos")
             require(resource.get("driver", "local" if kind == "volumes" else "bridge") in ("local", "bridge"),
                     "Controlador no admitido")
-            require(relative(resource.get("file", ".")), "Archivo fuera del proyecto")
+            require(project_relative(resource.get("file", ".")), "Archivo fuera del proyecto")
 
 
 def configure(config, policy):
@@ -181,6 +297,9 @@ def deploy(base, policy, commit, stream):
     else:
         definition = source / policy["compose"]
     require(definition.is_file(), "Compose no encontrado")
+    # Parse without invoking Compose: include/extends and env_file can read
+    # host files during `config`, before the normalized model is available.
+    validate(load_definition(definition), project, raw=True)
     print("Validando el commit " + commit + "…", flush=True)
     with (release / "deploy.log").open("wb") as log:
         rendered = release / "rendered.json"

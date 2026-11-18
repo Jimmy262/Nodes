@@ -289,28 +289,18 @@ func prepareComposeEdit(p *operationPlan) error {
 			return err
 		}
 		if d.ID != "" {
-			old := ""
+			var old editableDomain
 			for _, v := range e.before.Domains {
 				if v.ID == d.ID {
-					old = v.Host
+					old = v
 				}
 			}
-			changed := false
-			for key, rule := range labels {
-				if !strings.HasPrefix(key, "traefik.http.routers.") || !strings.HasSuffix(key, ".rule") {
-					continue
-				}
-				for _, quote := range []string{"`", "\""} {
-					literal := quote + old + quote
-					if strings.Contains(rule, literal) {
-						rule = strings.ReplaceAll(rule, literal, quote+d.Host+quote)
-						changed = true
-					}
-				}
-				labels[key] = rule
+			var proxy proxyOptions
+			if p.access != nil {
+				proxy = p.access.Proxy
 			}
-			if !changed {
-				return errors.New("El dominio está definido mediante una variable o archivo externo. Cambia esa variable en este formulario o edita su archivo de origen")
+			if err := editDomainLabels(labels, old, d, proxy); err != nil {
+				return err
 			}
 		} else {
 			if service["network_mode"] != nil {
@@ -378,6 +368,44 @@ func prepareComposeEdit(p *operationPlan) error {
 	sort.Strings(e.services)
 	return nil
 }
+
+// Resolve the backend from the matching router; never change unrelated services.
+func updateDomainPort(labels map[string]string, host string, port int) error {
+	keys := map[string]bool{}
+	for key, rule := range labels {
+		if !strings.HasPrefix(key, "traefik.http.routers.") || !strings.HasSuffix(key, ".rule") {
+			continue
+		}
+		if !strings.Contains(rule, "`"+host+"`") && !strings.Contains(rule, "\""+host+"\"") {
+			continue
+		}
+		service := labels[strings.TrimSuffix(key, ".rule")+".service"]
+		if strings.Contains(service, "@") {
+			continue
+		}
+		if service != "" {
+			keys["traefik.http.services."+service+".loadbalancer.server.port"] = true
+			continue
+		}
+		candidates := []string{}
+		for candidate := range labels {
+			if strings.HasPrefix(candidate, "traefik.http.services.") && strings.HasSuffix(candidate, ".loadbalancer.server.port") {
+				candidates = append(candidates, candidate)
+			}
+		}
+		if len(candidates) != 1 {
+			return errors.New("No se pudo identificar el servicio de Traefik para cambiar el puerto")
+		}
+		keys[candidates[0]] = true
+	}
+	if len(keys) == 0 {
+		return errors.New("No se pudo identificar el servicio de Traefik para cambiar el puerto")
+	}
+	for key := range keys {
+		labels[key] = strconv.Itoa(port)
+	}
+	return nil
+}
 func composeEditScript(p *operationPlan) string {
 	c := p.edit.before.compose
 	tmp := c.File + ".nodo-" + p.ID[:16]
@@ -393,6 +421,60 @@ func composeEditScript(p *operationPlan) string {
 		"trap " + shellQuote("rm -f -- "+shellQuote(tmp)) + " EXIT; " + composeEditorCommand(c, tmp) + " config --quiet > " + base + "/apply.log 2>&1; " + check + "; " +
 		"cp -p -- " + shellQuote(c.File) + " " + base + "/compose.before; chmod 600 " + base + "/compose.before; mv -- " + shellQuote(tmp) + " " + shellQuote(c.File) + "; " +
 		"if " + up + " >> " + base + "/apply.log 2>&1; then printf APPLIED; else cp -- " + base + "/compose.before " + shellQuote(tmp) + "; chmod 600 " + shellQuote(tmp) + "; mv -- " + shellQuote(tmp) + " " + shellQuote(c.File) + "; if " + up + " >> " + base + "/apply.log 2>&1; then printf ROLLED_BACK; else printf RECOVERY_REQUIRED; fi; exit 1; fi"
+}
+
+// GitHub releases have a separate policy that is reused by the next push.
+// Keep a corrected port there too, under the deployer's own lock.
+func composeEditCommand(p *operationPlan) string {
+	command := composeEditScript(p)
+	c := p.edit.before.compose
+	d := p.edit.input.Domain
+	if !p.edit.domainChanged || d == nil {
+		return command
+	}
+	base := path.Dir(path.Dir(path.Dir(c.File)))
+	id := path.Base(base)
+	if path.Base(c.File) != "compose.json" || path.Base(path.Dir(path.Dir(c.File))) != "releases" || len(id) != 64 || strings.Trim(id, "0123456789abcdef") != "" || base != path.Join(path.Dir(c.PrivateRoot), "github", id) {
+		return command
+	}
+	// All routing labels come from the reviewed Compose, outside the build context.
+	var doc map[string]any
+	if yaml.Unmarshal(p.edit.composeBytes, &doc) != nil {
+		return command
+	}
+	services, _ := doc["services"].(map[string]any)
+	service, _ := services[d.Service].(map[string]any)
+	labels, _ := composeStringMap(service["labels"])
+	ports := map[string]string{}
+	for key, value := range labels {
+		if strings.HasPrefix(key, "traefik.") {
+			ports[key] = value
+		}
+	}
+	patch, _ := json.Marshal(ports)
+	script := `import fcntl, json, os, pathlib, subprocess, sys
+base = pathlib.Path(sys.argv[1])
+with (base / 'deploy.lock').open('a') as lock:
+ fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+ target = base / 'policy.json'
+ policy = json.loads(target.read_text())
+ if policy['service'] != sys.argv[2]: raise RuntimeError('Public service changed')
+ labels = policy['labels'][sys.argv[2]]
+ ports = json.loads(sys.argv[4])
+ if not ports: raise RuntimeError('Missing routing policy')
+ policy['labels'][sys.argv[2]] = ports
+ policy['port'] = int(sys.argv[3])
+ temporary = base / ('policy-edit-' + sys.argv[5] + '.tmp')
+ try:
+  with temporary.open('x') as output:
+   os.chmod(temporary, 0o600)
+   json.dump(policy, output)
+  subprocess.run(['sh', '-c', sys.argv[6]], check=True)
+  temporary.replace(target)
+ finally:
+  temporary.unlink(missing_ok=True)
+`
+	return "python3 -c " + shellQuote(script) + " " + shellQuote(base) + " " + shellQuote(d.Service) + " " + strconv.Itoa(d.Port) + " " + shellQuote(string(patch)) + " " + shellQuote(p.ID) + " " + shellQuote(command)
 }
 func (a *App) applyComposeEdit(ctx context.Context, p *operationPlan) error {
 	a.operationState(p, "running", "Guardando Compose y actualizando los servicios modificados…")
@@ -415,7 +497,7 @@ func (a *App) applyComposeEdit(ctx context.Context, p *operationPlan) error {
 		return err
 	}
 	defer clear(payload.Bytes())
-	err := a.stream(ctx, p.server, composeEditScript(p), &payload, out)
+	err := a.stream(ctx, p.server, composeEditCommand(p), &payload, out)
 	if err != nil {
 		if string(out.data) == "ROLLED_BACK" {
 			return errors.New("No se pudo aplicar el cambio. Se restauró la configuración anterior y Compose recuperó los servicios")

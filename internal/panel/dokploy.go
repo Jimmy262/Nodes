@@ -17,6 +17,9 @@ import (
 
 func connectionHash(s Server) string {
 	b, _ := json.Marshal([]any{s.ID, s.Host, s.Port, s.User, s.Identity})
+	if s.sshKeyID != "" {
+		b = append(b, []byte(s.sshKeyID)...)
+	}
 	return hashBytes(b)
 }
 func sealDokployKey(s Server, key []byte) ([]byte, []byte, error) {

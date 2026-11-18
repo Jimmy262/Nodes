@@ -35,7 +35,7 @@ Conserva espacio libre alrededor del símbolo, equivalente al diámetro de uno d
 
 ## Cambiar de paleta
 
-En **Apariencia**, disponible en la barra lateral y en el acceso al panel, elige una de las nueve opciones. Se aplica inmediatamente y se recuerda en este navegador. No cambia el PIN, las credenciales, los servidores ni la configuración remota.
+En **Apariencia**, disponible en la barra lateral y en el acceso al panel, elige una de las nueve opciones. Se aplica inmediatamente y se recuerda en este navegador. No cambia las passkeys, las credenciales, los servidores ni la configuración remota.
 
 | Opción | Color principal | Secundario |
 | --- | --- | --- |

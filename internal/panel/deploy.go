@@ -42,7 +42,7 @@ func safeArchivePath(name string) bool {
 	return name != "" && len(name) <= 240 && !strings.ContainsAny(name, "\\:\x00\r\n") && !strings.HasPrefix(name, "/") && path.Clean(name) == strings.TrimSuffix(name, "/") && name != "." && name != ".." && !strings.HasPrefix(name, "../")
 }
 func relativeProjectPath(s string) bool {
-	return s == "." || (safeArchivePath(strings.TrimPrefix(s, "./")) && !strings.Contains(s, "$") && !strings.Contains(s, "://"))
+	return s == "." || (safeArchivePath(strings.TrimPrefix(s, "./")) && !strings.HasPrefix(s, "~") && !strings.Contains(s, "$") && !strings.Contains(s, "://"))
 }
 func zipRead(f *zip.File) ([]byte, error) {
 	r, e := f.Open()
@@ -57,6 +57,22 @@ func zipRead(f *zip.File) ([]byte, error) {
 	return b, nil
 }
 func inspectZip(data []byte, hostPort, containerPort int) (*zipProject, error) {
+	return inspectZipWithCompose(data, hostPort, containerPort, "")
+}
+
+// Explicit GitHub selections are relative to the selected project folder.
+// Keeping the manifest at that root preserves relative build and mount paths
+// when the reviewed file is used by future deployments.
+func validComposeFilename(name string) bool {
+	extension := path.Ext(name)
+	return len(name) <= 120 && safeArchivePath(name) && name == path.Base(name) &&
+		!strings.HasPrefix(name, "-") && (extension == ".yaml" || extension == ".yml")
+}
+
+func inspectZipWithCompose(data []byte, hostPort, containerPort int, composeFile string) (*zipProject, error) {
+	if composeFile != "" && !validComposeFilename(composeFile) {
+		return nil, errors.New("Indica un archivo Compose .yml o .yaml en la carpeta del proyecto")
+	}
 	z, e := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if e != nil {
 		return nil, errors.New("El archivo no es un ZIP válido")
@@ -106,6 +122,9 @@ func inspectZip(data []byte, hostPort, containerPort int) (*zipProject, error) {
 		return ""
 	}
 	p.compose = selectRoot(candidates)
+	if composeFile != "" {
+		p.compose = composeFile
+	}
 	var definition []byte
 	if p.compose != "" {
 		p.root = path.Dir(p.compose)
@@ -115,7 +134,7 @@ func inspectZip(data []byte, hostPort, containerPort int) (*zipProject, error) {
 				count++
 			}
 		}
-		if count != 1 {
+		if composeFile == "" && count != 1 {
 			return nil, errors.New("Deja un solo archivo Compose principal en la carpeta raíz")
 		}
 		for _, f := range p.files {
@@ -125,6 +144,9 @@ func inspectZip(data []byte, hostPort, containerPort int) (*zipProject, error) {
 					return nil, e
 				}
 			}
+		}
+		if definition == nil && composeFile != "" {
+			return nil, fmt.Errorf("No se encontró el archivo Compose %s en la carpeta del proyecto", composeFile)
 		}
 	} else {
 		p.dockerfile = true
@@ -145,10 +167,10 @@ func inspectZip(data []byte, hostPort, containerPort int) (*zipProject, error) {
 	}
 	var config map[string]any
 	if yaml.Unmarshal(definition, &config) != nil {
-		return nil, errors.New("El archivo Compose no es válido")
+		return nil, fmt.Errorf("El archivo Compose %s no es válido", p.compose)
 	}
 	if e = validateCompose(config); e != nil {
-		return nil, e
+		return nil, fmt.Errorf("%s: %w", p.compose, e)
 	}
 	p.config = config
 	services, _ := config["services"].(map[string]any)
@@ -202,7 +224,7 @@ func validateCompose(c map[string]any) error {
 		if !ok {
 			return bad("definición de servicio inválida")
 		}
-		for _, key := range []string{"extends", "container_name", "network_mode", "pid", "ipc", "uts", "userns_mode", "devices", "device_cgroup_rules", "volumes_from", "external_links", "cap_add", "post_start", "pre_stop", "develop", "provider", "profiles", "gpus", "use_api_socket"} {
+		for _, key := range []string{"extends", "label_file", "container_name", "network_mode", "pid", "ipc", "uts", "userns_mode", "devices", "device_cgroup_rules", "volumes_from", "external_links", "cap_add", "post_start", "pre_stop", "develop", "provider", "profiles", "gpus", "use_api_socket"} {
 			if s[key] != nil {
 				return bad("la opción " + key + " necesita configuración manual")
 			}

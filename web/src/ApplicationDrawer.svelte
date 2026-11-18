@@ -11,6 +11,7 @@
     Trash2,
     ArrowRightLeft,
     Pencil,
+    RefreshCw,
   } from '@lucide/svelte';
   import { bytes, percent, hostname, statusLabel, age, modal } from './format.js';
   export let app;
@@ -19,6 +20,28 @@
   export let now;
   export let onManage;
   export let onEdit;
+  export let onUpdate;
+  let githubDeployment = null,
+    githubLoading = true,
+    githubError = '';
+  async function loadGithub() {
+    githubLoading = true;
+    githubError = '';
+    try {
+      const deployments = await api('/github/deployments');
+      if (mounted)
+        githubDeployment =
+          deployments.find(
+            (d) =>
+              Number(d.serverId) === Number(app.serverId) &&
+              app.id === `${d.serverId}:compose:${d.project}`,
+          ) || null;
+    } catch (error) {
+      if (mounted) githubError = error.message;
+    } finally {
+      if (mounted) githubLoading = false;
+    }
+  }
   let tab = 'summary';
   let expandedContainers = new Map();
   let containerID = app.services[0]?.ID || '';
@@ -71,6 +94,7 @@
   }
   onMount(() => {
     mounted = true;
+    loadGithub();
     const timer = setInterval(() => {
       if (tab === 'logs' && !paused && !document.hidden) fetchLogs();
     }, 15000);
@@ -104,6 +128,29 @@
     <button class="secondary edit-application-button" on:click={onEdit}
       ><Pencil size={15} />Editar configuración</button
     >
+    {#if githubDeployment}
+      <button class="primary edit-application-button" on:click={() => onUpdate(githubDeployment)}
+        ><RefreshCw size={15} />Actualizar desde GitHub</button
+      >
+      <a
+        class="detail-link"
+        href={`https://github.com/${githubDeployment.repository}`}
+        target="_blank"
+        rel="noopener noreferrer">Ver repositorio <ArrowUpRight size={14} /></a
+      >
+      <p class="small muted">
+        Rama: {githubDeployment.branch}. Se conservarán los datos de la aplicación.
+      </p>
+    {:else if githubLoading}
+      <p class="small muted">Comprobando conexión con GitHub…</p>
+    {:else if githubError}
+      <p class="notice error">{githubError}</p>
+      <button class="text-button" on:click={loadGithub}>Reintentar conexión con GitHub</button>
+    {:else if !app.internal}
+      <p class="small muted">
+        Esta aplicación no tiene un despliegue de GitHub vinculado en Nodes.
+      </p>
+    {/if}
     {#if app.links[0]}<a
         class="public-entry"
         href={app.links[0].url}

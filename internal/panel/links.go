@@ -29,20 +29,37 @@ type PublicLink struct {
 	Source string `json:"source"`
 }
 type Container struct {
-	ID     string       `json:"ID"`
-	Names  string       `json:"Names"`
-	Image  string       `json:"Image"`
-	Status string       `json:"Status"`
-	Links  []PublicLink `json:"links"`
-	Health string       `json:"health,omitempty"`
+	ID             string       `json:"ID"`
+	Names          string       `json:"Names"`
+	Image          string       `json:"Image"`
+	Status         string       `json:"Status"`
+	Links          []PublicLink `json:"links"`
+	Health         string       `json:"health,omitempty"`
+	LinksTruncated bool         `json:"linksTruncated,omitempty"`
 }
 type inspectedContainer struct {
 	Container
-	Labels   map[string]string `json:"Labels"`
-	Networks map[string]struct {
+	linkIndex  map[string]int
+	linkBudget *linkBudget
+	Labels     map[string]string `json:"Labels"`
+	Networks   map[string]struct {
 		Aliases  []string `json:"Aliases"`
 		DNSNames []string `json:"DNSNames"`
 	} `json:"Networks"`
+}
+
+// Bound derived inventory data independently of the SSH response byte limit.
+// The work budget also covers duplicate associations and cached-link restores.
+const maxRuleLinks = 64
+const maxContainerLinks = 64
+const maxInventoryLinks = 4096
+const maxLinkAttempts = 65536
+const truncatedLinksWarning = "Se alcanzó el límite de detección de enlaces; algunos enlaces no se muestran."
+
+type linkBudget struct {
+	links     int
+	attempts  int
+	truncated bool
 }
 type proxyRouter struct {
 	Rule        string   `yaml:"rule"`
@@ -99,6 +116,46 @@ func ruleLinks(rule string, secure bool, source string) []PublicLink {
 	}
 	return links
 }
+
+// Inventory extraction is deliberately separate: editing and migration callers
+// of ruleLinks must still see the complete rule when validating configuration.
+func inventoryRuleLinks(rule string, secure bool, source string) ([]PublicLink, bool) {
+	scheme := "http"
+	if secure {
+		scheme = "https"
+	}
+	links := []PublicLink{}
+	seen := map[string]bool{}
+	for offset := 0; offset < len(rule); {
+		match := hostRulePattern.FindStringSubmatchIndex(rule[offset:])
+		if match == nil {
+			break
+		}
+		literals := rule[offset+match[2] : offset+match[3]]
+		offset += match[1]
+		for len(literals) > 0 {
+			literal := literalPattern.FindStringSubmatchIndex(literals)
+			if literal == nil {
+				break
+			}
+			start, end := literal[2], literal[3]
+			if start < 0 {
+				start, end = literal[4], literal[5]
+			}
+			link := publicURL(literals[start:end], scheme)
+			literals = literals[literal[1]:]
+			if link == "" || seen[link] {
+				continue
+			}
+			if len(links) == maxRuleLinks {
+				return links, true
+			}
+			seen[link] = true
+			links = append(links, PublicLink{URL: link, Source: source})
+		}
+	}
+	return links, false
+}
 func secureRouter(router proxyRouter) bool {
 	if router.TLS != nil {
 		return true
@@ -111,17 +168,42 @@ func secureRouter(router proxyRouter) bool {
 	return false
 }
 func addLinks(container *inspectedContainer, links []PublicLink) {
+	if container.linkBudget == nil {
+		container.linkBudget = &linkBudget{links: len(container.Links)}
+	}
+	if container.linkIndex == nil {
+		container.linkIndex = map[string]int{}
+		for i, link := range container.Links {
+			container.linkIndex[link.URL] = i
+		}
+	}
+	budget := container.linkBudget
 	for _, link := range links {
-		duplicate := false
-		for _, existing := range container.Links {
-			if existing.URL == link.URL {
-				duplicate = true
-				break
+		if budget.attempts >= maxLinkAttempts {
+			container.LinksTruncated, budget.truncated = true, true
+			return
+		}
+		budget.attempts++
+		if _, duplicate := container.linkIndex[link.URL]; duplicate {
+			continue
+		}
+		// An HTTPS upgrade remains possible even after cardinality is exhausted.
+		if strings.HasPrefix(link.URL, "https:") {
+			httpURL := "http:" + strings.TrimPrefix(link.URL, "https:")
+			if i, ok := container.linkIndex[httpURL]; ok && (len(container.Links) >= maxContainerLinks || budget.links >= maxInventoryLinks) {
+				delete(container.linkIndex, httpURL)
+				container.Links[i] = link
+				container.linkIndex[link.URL] = i
+				continue
 			}
 		}
-		if !duplicate {
-			container.Links = append(container.Links, link)
+		if len(container.Links) >= maxContainerLinks || budget.links >= maxInventoryLinks {
+			container.LinksTruncated, budget.truncated = true, true
+			continue
 		}
+		container.linkIndex[link.URL] = len(container.Links)
+		container.Links = append(container.Links, link)
+		budget.links++
 	}
 }
 func sortLinks(links []PublicLink) {
@@ -134,6 +216,7 @@ func sortLinks(links []PublicLink) {
 }
 func parseContainers(out string) ([]*inspectedContainer, error) {
 	items := []*inspectedContainer{}
+	budget := &linkBudget{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -144,8 +227,15 @@ func parseContainers(out string) ([]*inspectedContainer, error) {
 		}
 		item.Names = strings.TrimPrefix(item.Names, "/")
 		item.Links = []PublicLink{}
+		item.LinksTruncated = false
+		item.linkBudget = budget
 		if item.Labels["traefik.enable"] != "false" {
-			for key, value := range item.Labels {
+			keys := make([]string, 0, len(item.Labels))
+			for key := range item.Labels {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
 				if !strings.HasPrefix(key, "traefik.http.routers.") || !strings.HasSuffix(key, ".rule") {
 					continue
 				}
@@ -156,28 +246,58 @@ func parseContainers(out string) ([]*inspectedContainer, error) {
 						secure = true
 					}
 				}
-				addLinks(&item, ruleLinks(value, secure, "Traefik · Docker"))
+				if budget.attempts >= maxLinkAttempts {
+					item.LinksTruncated, budget.truncated = true, true
+					break
+				}
+				links, truncated := inventoryRuleLinks(item.Labels[key], secure, "Traefik · Docker")
+				item.LinksTruncated = item.LinksTruncated || truncated
+				budget.truncated = budget.truncated || truncated
+				addLinks(&item, links)
 			}
 		}
 		items = append(items, &item)
 	}
 	return items, nil
 }
-func (item *inspectedContainer) matches(host string) bool {
-	if item.Names == host || item.Labels["com.docker.swarm.service.name"] == host {
-		return true
+func applyFileRoutes(items []*inspectedContainer, data string) []string {
+	warnings := []string{}
+	budget := &linkBudget{}
+	if len(items) > 0 && items[0].linkBudget != nil {
+		budget = items[0].linkBudget
 	}
-	for _, network := range item.Networks {
-		for _, alias := range append(append([]string{}, network.Aliases...), network.DNSNames...) {
-			if alias == host {
-				return true
+	byHost := map[string][]*inspectedContainer{}
+	for _, item := range items {
+		if item.linkBudget != budget {
+			budget.links += len(item.Links)
+			item.linkBudget = budget
+		}
+		seen := map[string]bool{}
+		index := func(host string) {
+			if host != "" && !seen[host] {
+				seen[host] = true
+				byHost[host] = append(byHost[host], item)
+			}
+		}
+		index(item.Names)
+		index(item.Labels["com.docker.swarm.service.name"])
+		for _, network := range item.Networks {
+			for _, alias := range network.Aliases {
+				index(alias)
+			}
+			for _, name := range network.DNSNames {
+				index(name)
 			}
 		}
 	}
-	return false
-}
-func applyFileRoutes(items []*inspectedContainer, data string) []string {
-	warnings := []string{}
+	// Warnings use the existing API channel; the per-container flag also covers
+	// Docker labels when the subsequent route read fails.
+	finish := func() []string {
+		if budget.truncated {
+			warnings = append(warnings, truncatedLinksWarning)
+		}
+		return warnings
+	}
 	for _, document := range strings.Split(data, "\x1e") {
 		if strings.TrimSpace(document) == "" {
 			continue
@@ -187,21 +307,51 @@ func applyFileRoutes(items []*inspectedContainer, data string) []string {
 			warnings = append(warnings, "Una configuración de Dokploy no se pudo interpretar; sus enlaces no se muestran.")
 			continue
 		}
-		for _, router := range config.HTTP.Routers {
-			links := ruleLinks(router.Rule, secureRouter(router), "Traefik · Dokploy")
+		routerNames := make([]string, 0, len(config.HTTP.Routers))
+		for name := range config.HTTP.Routers {
+			routerNames = append(routerNames, name)
+		}
+		sort.Strings(routerNames)
+		for _, name := range routerNames {
+			if budget.attempts >= maxLinkAttempts {
+				budget.truncated = true
+				return finish()
+			}
+			router := config.HTTP.Routers[name]
+			links, truncated := inventoryRuleLinks(router.Rule, secureRouter(router), "Traefik · Dokploy")
+			budget.truncated = budget.truncated || truncated
+			if len(links) == 0 {
+				continue
+			}
 			service := config.HTTP.Services[strings.TrimSuffix(router.Service, "@file")]
+			seenTargets := map[string]bool{}
 			for _, backend := range service.LoadBalancer.Servers {
+				// Count backend probes as well as successful associations: many
+				// routers can reference one service whose targets match nothing.
+				if budget.attempts >= maxLinkAttempts {
+					budget.truncated = true
+					return finish()
+				}
+				budget.attempts++
 				target, err := url.Parse(backend.URL)
 				if err != nil || target.Hostname() == "" {
 					continue
 				}
-				for _, item := range items {
-					if item.matches(target.Hostname()) {
-						addLinks(item, links)
+				host := target.Hostname()
+				if seenTargets[host] {
+					continue
+				}
+				seenTargets[host] = true
+				for _, item := range byHost[host] {
+					item.LinksTruncated = item.LinksTruncated || truncated
+					addLinks(item, links)
+					if budget.attempts >= maxLinkAttempts {
+						budget.truncated = true
+						return finish()
 					}
 				}
 			}
 		}
 	}
-	return warnings
+	return finish()
 }

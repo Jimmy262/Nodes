@@ -33,9 +33,8 @@
     domainService = '',
     port = 80,
     secure = true;
-  let key = '',
-    connectionOpen = false,
-    copied = false,
+  let copied = false,
+    removeDomain = false,
     plan = null,
     job = null,
     jobID = '',
@@ -45,7 +44,12 @@
   $: selectedEnvironment = environment.find((service) => service.name === selectedService);
   $: hasDomainChange =
     domainEnabled &&
-    (domainMode === 'auto' || !chosenDomain || host.trim().toLowerCase() !== chosenDomain.host);
+    (removeDomain ||
+      secure !== chosenDomain?.https ||
+      domainMode === 'auto' ||
+      !chosenDomain ||
+      host.trim().toLowerCase() !== chosenDomain.host ||
+      Number(port) !== chosenDomain.port);
   $: variableChanges = environment
     .map((service) => ({
       name: service.name,
@@ -84,30 +88,13 @@
     }
   }
   function chooseDomain() {
+    removeDomain = false;
     const d = config?.domains.find((item) => item.id === domainID);
     host = d?.host || '';
     domainMode = 'custom';
     domainService = d?.service || environment[0]?.name || '';
     port = d?.port || 80;
     secure = d ? d.https : true;
-  }
-  async function connect() {
-    pending = true;
-    error = '';
-    try {
-      await api(`/servers/${app.serverId}/dokploy/connect`, {
-        method: 'POST',
-        body: JSON.stringify({ key }),
-        signal: AbortSignal.timeout(150000),
-      });
-      key = '';
-      connectionOpen = false;
-      await load();
-    } catch (e) {
-      error = e.message;
-    } finally {
-      pending = false;
-    }
   }
   function addVariable() {
     environment = environment.map((service) =>
@@ -142,6 +129,7 @@
     else if (environmentChanged) body.environment = variableChanges;
     if (hasDomainChange)
       body.domain = {
+        remove: removeDomain,
         id: domainID,
         host,
         automatic: domainMode === 'auto',
@@ -228,7 +216,6 @@
     return () => {
       alive = false;
       clearInterval(timer);
-      key = '';
       envText = '';
       environment = [];
       config = null;
@@ -275,36 +262,9 @@
     <button class="secondary" on:click={close}>Volver a la aplicación</button>
   {:else if config}
     <p class="small muted">Nombre, dominio y variables, sin salir de este formulario.</p>
-    {#if config.connectionRequired || connectionOpen}
-      <div class="editor-connection">
-        <h3>Conectar Dokploy</h3>
-        <p>
-          Solo una vez para <strong>{app.server.name}</strong>. Crea una clave en Dokploy → Ajustes
-          → Perfil → API/CLI y pégala aquí.
-        </p>
-        <label class="field"
-          >Clave API existente<input
-            type="password"
-            bind:value={key}
-            autocomplete="off"
-            placeholder="Pega tu clave de Dokploy"
-            disabled={pending}
-          /></label
-        >
-        <button class="secondary" disabled={pending || !key.trim()} on:click={connect}
-          >{pending ? 'Conectando…' : 'Conectar y cargar configuración'}</button
-        >
-        <small
-          >Se guarda cifrada para tu cuenta de Windows. La conexión usa el SSH de este servidor.</small
-        >
-      </div>
-    {:else if config.manager === 'Dokploy'}<div class="editor-manager">
-        <span><CheckCircle2 size={14} />Dokploy conectado</span><button
-          class="text-button small"
-          on:click={() => (connectionOpen = true)}
-          disabled={pending || !!plan}>Cambiar clave</button
-        >
-      </div>{/if}
+    <div class="editor-manager">
+      <span><CheckCircle2 size={14} />Gestión directa · {config.manager}</span>
+    </div>
     <form class="deployment-form" on:submit={review}>
       <fieldset disabled={pending || !!plan}>
         <label class="field"
@@ -338,9 +298,8 @@
                 >{/if}
             </div>
             {#if domainEnabled}
-              {#if config.domains.length > 1 || (config.domains.length && !domainID)}<label
-                  class="field spaced"
-                  >Enlace a editar<select bind:value={domainID} on:change={chooseDomain}
+              {#if config.domains.length}<label class="field spaced"
+                  >Dominio a editar<select bind:value={domainID} on:change={chooseDomain}
                     >{#each config.domains as d}<option value={d.id}
                         >{d.host}{d.path && d.path !== '/' ? d.path : ''}{d.service
                           ? ' · ' + d.service
@@ -377,31 +336,48 @@
                 >{:else}<p class="small muted">
                   Generaremos un enlace único en sslip.io al revisar los cambios.
                 </p>{/if}
-              {#if !domainID}<div class="form-pair">
-                  {#if environment.length}<label class="field"
-                      >Servicio público<select bind:value={domainService} required
-                        >{#each environment as service}<option value={service.name}
-                            >{service.name}</option
-                          >{/each}</select
-                      ></label
-                    >{/if}<label class="field"
-                    >Puerto interno<input
-                      type="number"
-                      min="1"
-                      max="65535"
-                      bind:value={port}
-                      required
-                    /></label
-                  >
-                </div>
-                <label class="deploy-checkbox"
-                  ><input type="checkbox" bind:checked={secure} /><span>HTTPS automático</span
-                  ></label
+              <div class="form-pair">
+                {#if !domainID && environment.length}<label class="field"
+                    >Servicio público<select bind:value={domainService} required
+                      >{#each environment as service}<option value={service.name}
+                          >{service.name}</option
+                        >{/each}</select
+                    ></label
+                  >{/if}<label class="field"
+                  >Puerto interno<input
+                    type="number"
+                    min="1"
+                    max="65535"
+                    bind:value={port}
+                    required
+                  /></label
                 >
-              {:else}<p class="small muted">
-                  Se conservan el puerto, la ruta y la configuración {secure ? 'HTTPS' : 'HTTP'} actuales.
+              </div>
+              <p class="small muted">Puerto donde escucha la aplicación dentro del contenedor.</p>
+              <label class="deploy-checkbox"
+                ><input type="checkbox" bind:checked={secure} /><span
+                  >HTTPS con certificado automático</span
+                ></label
+              >
+              <p class="small muted">
+                Al activar HTTPS, se solicitará un certificado de Let's Encrypt. El dominio debe
+                apuntar a este servidor.
+              </p>
+              {#if domainID}<button
+                  type="button"
+                  class="text-button"
+                  on:click={() => (removeDomain = !removeDomain)}
+                  ><Trash2 size={14} />{removeDomain
+                    ? 'Cancelar eliminación del dominio'
+                    : 'Eliminar este dominio'}</button
+                >{/if}
+              {#if removeDomain}<p class="notice error">
+                  Se eliminará {chosenDomain.host} al revisar y aplicar los cambios. La aplicación seguirá
+                  funcionando.
                 </p>{/if}
-              {#if hasDomainChange && domainMode === 'custom'}<div class="dns-hint">
+              {#if hasDomainChange && domainMode === 'custom' && (!chosenDomain || host
+                    .trim()
+                    .toLowerCase() !== chosenDomain.host)}<div class="dns-hint">
                   <strong>Conecta el dominio en tu proveedor DNS</strong><span
                     >Registro A · {host || 'app.midominio.com'} →
                     <code>{config.publicIp || 'IP pública del servidor'}</code></span

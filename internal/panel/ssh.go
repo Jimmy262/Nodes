@@ -74,7 +74,9 @@ func runSSH(parent context.Context, s Server, command string) (string, error) {
 
 func sshCommand(ctx context.Context, s Server, command string) *exec.Cmd {
 	args := []string{"-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-p", strconv.Itoa(s.Port), "-l", s.User}
-	if s.Identity != "" {
+	if s.sshIdentity != "" {
+		args = append(args, "-F", "none", "-i", s.sshIdentity, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "UserKnownHostsFile="+s.sshKnownHosts, "-o", "GlobalKnownHostsFile="+s.sshKnownHosts, "-o", "UpdateHostKeys=no")
+	} else if s.Identity != "" {
 		args = append(args, "-i", s.Identity, "-o", "IdentitiesOnly=yes")
 	}
 	args = append(args, "--", s.Host, command)
