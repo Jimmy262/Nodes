@@ -11,13 +11,14 @@ import (
 )
 
 const terminalRequirementsCommand = codexEnvironment + `;
-for name in tmux codex npm node; do if command -v "$name" >/dev/null 2>&1; then printf '%s=1\n' "$name"; else printf '%s=0\n' "$name"; fi; done
+for name in tmux codex claude npm node; do if command -v "$name" >/dev/null 2>&1; then printf '%s=1\n' "$name"; else printf '%s=0\n' "$name"; fi; done
 if [ "$(id -u)" = 0 ]; then printf 'admin=root\n'; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then printf 'admin=sudo\n'; else printf 'admin=none\n'; fi
 manager=none; for name in apt-get dnf yum apk; do if command -v "$name" >/dev/null 2>&1; then manager=$name; break; fi; done; printf 'manager=%s\n' "$manager"`
 
 type terminalRequirements struct {
 	Tmux         bool                 `json:"tmux"`
 	Codex        bool                 `json:"codex"`
+	Claude       bool                 `json:"claude"`
 	NPM          bool                 `json:"npm"`
 	Node         bool                 `json:"node"`
 	Admin        string               `json:"admin"`
@@ -51,6 +52,10 @@ func (a *App) terminalRequirements(ctx context.Context, s Server) (terminalRequi
 		}
 	}
 	r := terminalRequirements{Tmux: values["tmux"] == "1", Codex: values["codex"] == "1", NPM: values["npm"] == "1", Node: values["node"] == "1", Admin: values["admin"], Manager: values["manager"]}
+	if value := values["claude"]; value != "" && value != "0" && value != "1" {
+		return r, errors.New("No se pudieron comprobar los requisitos de Claude")
+	}
+	r.Claude = values["claude"] == "1"
 	if r.Admin != "root" && r.Admin != "sudo" && r.Admin != "none" {
 		return r, errors.New("Permisos de instalación no reconocidos")
 	}
@@ -70,14 +75,18 @@ func (a *App) terminalRequirements(ctx context.Context, s Server) (terminalRequi
 		{"tmux", "tmux · sesiones persistentes", r.Tmux, !r.Tmux && systemInstall, reason},
 		{"nodejs", "Node.js y npm", r.Node && r.NPM, !(r.Node && r.NPM) && systemInstall, reason},
 		{"codex", "Codex CLI", r.Codex, !r.Codex && r.NPM && r.Node, ""},
+		{"claude", "Claude Code", r.Claude, !r.Claude && r.NPM && r.Node, ""},
 	}
 	if !r.NPM || !r.Node {
 		r.Dependencies[2].Reason = "Primero instala Node.js y npm."
+		r.Dependencies[3].Reason = "Primero instala Node.js y npm."
 	}
 	return r, nil
 }
-func (r terminalRequirements) ready(kind string) bool { return r.Tmux && (kind == "shell" || r.Codex) }
-func (r terminalRequirements) snapshot() string       { raw, _ := json.Marshal(r); return hashBytes(raw) }
+func (r terminalRequirements) ready(kind string) bool {
+	return r.Tmux && (kind == "shell" || kind == "codex" && r.Codex || kind == "claude" && r.Claude)
+}
+func (r terminalRequirements) snapshot() string { raw, _ := json.Marshal(r); return hashBytes(raw) }
 func (a *App) terminalOptions(w http.ResponseWriter, r *http.Request) {
 	s, err := a.server(r)
 	if err != nil || validate(s) != nil {
@@ -100,7 +109,7 @@ func (a *App) terminalInstallReview(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Package string `json:"package"`
 	}
-	if decode(w, r, &in) != nil || (in.Package != "tmux" && in.Package != "nodejs" && in.Package != "codex") {
+	if decode(w, r, &in) != nil || (in.Package != "tmux" && in.Package != "nodejs" && in.Package != "codex" && in.Package != "claude") {
 		fail(w, 400, "Paquete de terminal inválido")
 		return
 	}
@@ -125,9 +134,13 @@ func (a *App) terminalInstallReview(w http.ResponseWriter, r *http.Request) {
 	}
 	summary := []string{"Instalar " + dependency.Name + " en " + s.Name + ".", "Conservar las sesiones y aplicaciones existentes."}
 	warnings := []string{"La descarga necesita acceso a Internet. Si falla, pueden quedar paquetes parcialmente instalados; vuelve a comprobar los requisitos."}
-	if in.Package == "codex" {
-		summary = append(summary, "Descargar @openai/codex desde npm e instalarlo en ~/.local para el usuario SSH. No inicia sesión en OpenAI automáticamente.")
-		warnings = append(warnings, "npm ejecuta los scripts de instalación del paquete oficial. Codex puede solicitar autenticación al abrirlo.")
+	if in.Package == "codex" || in.Package == "claude" {
+		pkg, provider := "@openai/codex", "OpenAI"
+		if in.Package == "claude" {
+			pkg, provider = "@anthropic-ai/claude-code", "Anthropic"
+		}
+		summary = append(summary, "Descargar "+pkg+" desde npm e instalarlo en ~/.local para el usuario SSH. No inicia sesión en "+provider+" automáticamente.")
+		warnings = append(warnings, "npm ejecuta los scripts de instalación del paquete oficial. La herramienta puede solicitar autenticación al abrirla.")
 	} else {
 		summary = append(summary, "Usar "+options.Manager+" con permisos "+options.Admin+" para instalar paquetes del sistema.")
 		warnings = append(warnings, "Instalar Node.js/npm puede incorporar o actualizar sus dependencias según los repositorios de la distribución.")
@@ -136,11 +149,15 @@ func (a *App) terminalInstallReview(w http.ResponseWriter, r *http.Request) {
 	a.savePlan(w, r, p)
 }
 func terminalInstallCommand(pkg string, r terminalRequirements) (string, error) {
-	if pkg == "codex" {
+	if pkg == "codex" || pkg == "claude" {
 		if !r.NPM || !r.Node {
 			return "", errors.New("Falta Node.js/npm")
 		}
-		return `exec "${SHELL:-/bin/sh}" -lc ` + shellQuote(codexEnvironment+`; umask 077; npm install --global --prefix "$HOME/.local" --registry=https://registry.npmjs.org @openai/codex`), nil
+		name := "@openai/codex"
+		if pkg == "claude" {
+			name = "@anthropic-ai/claude-code"
+		}
+		return `exec "${SHELL:-/bin/sh}" -lc ` + shellQuote(codexEnvironment+`; umask 077; npm install --global --prefix "$HOME/.local" --registry=https://registry.npmjs.org `+name), nil
 	}
 	packages := "tmux"
 	if pkg == "nodejs" {

@@ -15,13 +15,14 @@
     Trash2,
     Upload,
     History,
-    SquareTerminal,
+    RefreshCw,
   } from '@lucide/svelte';
   import AppTable from './AppTable.svelte';
   import ApplicationDrawer from './ApplicationDrawer.svelte';
   import ApplicationEditor from './ApplicationEditor.svelte';
   import HistoryChart from './HistoryChart.svelte';
   import AuthScreen from './AuthScreen.svelte';
+  import ConnectServer from './ConnectServer.svelte';
   import BrandLogo from './BrandLogo.svelte';
   import ThemeControl from './ThemeControl.svelte';
   import SecurityDialog from './SecurityDialog.svelte';
@@ -29,8 +30,11 @@
   import OperationDialog from './OperationDialog.svelte';
   import DeploymentDialog from './DeploymentDialog.svelte';
   import GithubDialog from './GithubDialog.svelte';
+  import NodesUpdateDialog from './NodesUpdateDialog.svelte';
+  import GithubApplicationUpdate from './GithubApplicationUpdate.svelte';
   import ComposeLibrary from './ComposeLibrary.svelte';
   import OperationsHistory from './OperationsHistory.svelte';
+  import ProviderIcon from './ProviderIcon.svelte';
   import { createApiClient } from './lib/api.js';
   import { bytes, percent, age, stale, storageRead, storageWrite, modal } from './format.js';
   const designPreview =
@@ -63,11 +67,9 @@
     selectedAppID = '',
     connectionID = null;
   let adding = false,
-    saving = false,
     formError = '',
     removing = false,
     confirmRemoval = false;
-  let form = { name: '', host: '', port: 22, user: 'root', identity: '' };
   let editingApp = null;
   let terminalView = null;
   function openTerminal(server, kind) {
@@ -194,6 +196,9 @@
       ready = true;
       loaded = true;
     } else {
+      restoreAccess();
+    }
+    function restoreAccess() {
       const fragment = new URLSearchParams(location.hash.slice(1));
       const setupToken = fragment.get('setup');
       if (setupToken) history.replaceState(null, '', location.pathname + location.search);
@@ -220,12 +225,14 @@
           if (active) ready = true;
         });
     }
+    window.addEventListener('hashchange', restoreAccess);
     const timer = setInterval(() => {
       if (authenticated && !document.hidden) refresh();
     }, 5000);
     const clock = setInterval(() => (now = Date.now()), 1000);
     return () => {
       active = false;
+      window.removeEventListener('hashchange', restoreAccess);
       clearInterval(timer);
       clearInterval(clock);
     };
@@ -299,24 +306,10 @@
     view = 'apps';
     connectionID = null;
   }
-  async function save(event) {
-    event.preventDefault();
-    saving = true;
-    formError = '';
-    try {
-      const server = await api('/servers', {
-        method: 'POST',
-        body: JSON.stringify({ ...form, port: Number(form.port) }),
-      });
-      if (selection !== null) selection = [...selection, server.id];
-      form = { name: '', host: '', port: 22, user: 'root', identity: '' };
-      adding = false;
-      await refresh();
-    } catch (e) {
-      formError = e.message;
-    } finally {
-      saving = false;
-    }
+  async function serverConnected(server) {
+    if (selection !== null) selection = [...selection, server.id];
+    adding = false;
+    await refresh();
   }
   async function removeServer() {
     if (!connection) return;
@@ -392,6 +385,14 @@
         >
       </nav>
       <div class="sidebar-bottom">
+        <button
+          class="appearance-shortcut"
+          type="button"
+          aria-label="Actualizaciones de Nodes"
+          title="Actualizaciones de Nodes"
+          on:click={() => (operation = { kind: 'nodes-update' })}
+          ><RefreshCw size={17} /><span class="appearance-label">Actualizar Nodes</span></button
+        >
         <ThemeControl />
         <button
           class="security-shortcut"
@@ -687,17 +688,22 @@
               </div>
               <div class="server-actions">
                 <button
-                  class="secondary codex-button"
+                  class="icon-button terminal-launch"
                   on:click={() => openTerminal(server, 'codex')}
                   aria-label={`Abrir Codex en ${server.name}`}
-                  title="Abrir o retomar Codex"><SquareTerminal size={17} />Codex</button
+                  title="Codex"><ProviderIcon kind="codex" /></button
                 >
                 <button
-                  class="secondary codex-button"
+                  class="icon-button terminal-launch"
+                  on:click={() => openTerminal(server, 'claude')}
+                  aria-label={`Abrir Claude en ${server.name}`}
+                  title="Claude Code"><ProviderIcon kind="claude" /></button
+                >
+                <button
+                  class="icon-button terminal-launch"
                   on:click={() => openTerminal(server, 'shell')}
                   aria-label={`Abrir terminal de ${server.name}`}
-                  title="Abrir o retomar la terminal SSH"
-                  ><SquareTerminal size={17} />Terminal</button
+                  title="Abrir o retomar la terminal SSH"><ProviderIcon kind="shell" /></button
                 >
                 <button
                   class="icon-button"
@@ -743,6 +749,15 @@
       app={selectedApp}
       {api}
       {now}
+      onUpdate={(deployment) => {
+        operation = {
+          kind: 'github-update',
+          deployment,
+          appId: selectedApp.id,
+          appName: selectedApp.name,
+        };
+        selectedAppID = '';
+      }}
       onEdit={() => {
         editingApp = selectedApp;
         selectedAppID = '';
@@ -769,6 +784,17 @@
       onClose={() => (operation = null)}
       onStarted={refresh}
     />
+  {:else if operation?.kind === 'github-update'}<GithubApplicationUpdate
+      deployment={operation.deployment}
+      appName={operation.appName}
+      {api}
+      onClose={() => {
+        selectedAppID = operation.appId;
+        operation = null;
+      }}
+      onUpdated={refresh}
+    />
+  {:else if operation?.kind === 'nodes-update'}<NodesUpdateDialog {api} onClose={() => (operation = null)} />
   {:else if operation?.kind === 'github'}<GithubDialog
       sourceId={operation.sourceId}
       {api}
@@ -795,62 +821,7 @@
       {servers}
       onClose={() => (activityOpen = false)}
     />{/if}
-  {#if adding}<dialog
-      use:modal
-      class="form-dialog"
-      aria-labelledby="connect-title"
-      on:cancel={() => (adding = false)}
-    >
-      <header>
-        <h2 id="connect-title">Conectar servidor</h2>
-        <button class="icon-button" on:click={() => (adding = false)} aria-label="Cerrar formulario"
-          ><X size={20} /></button
-        >
-      </header>
-      <p class="muted">Usa la conexión SSH que ya tienes en este equipo.</p>
-      <form on:submit={save}>
-        <label class="field"
-          >Nombre<input
-            bind:value={form.name}
-            placeholder="Producción"
-            maxlength="80"
-            required
-          /></label
-        ><label class="field"
-          >Host o alias SSH<input
-            bind:value={form.host}
-            placeholder="mi-servidor o 203.0.113.10"
-            required
-          /></label
-        >
-        <div class="form-pair">
-          <label class="field">Usuario<input bind:value={form.user} required /></label><label
-            class="field"
-            >Puerto<input
-              type="number"
-              bind:value={form.port}
-              min="1"
-              max="65535"
-              required
-            /></label
-          >
-        </div>
-        <label class="field"
-          >Ruta de clave privada <span class="muted small"
-            >Opcional si está en tu configuración SSH</span
-          ><input
-            bind:value={form.identity}
-            placeholder="C:\Users\tu-usuario\.ssh\id_ed25519"
-          /></label
-        >{#if formError}<p class="notice error" role="alert">{formError}</p>{/if}
-        <p class="small muted">
-          Las aplicaciones y métricas se cargarán automáticamente al conectar.
-        </p>
-        <button class="primary" disabled={saving}
-          >{saving ? 'Guardando…' : 'Conectar servidor'}<ArrowRight size={16} /></button
-        >
-      </form>
-    </dialog>{/if}
+  {#if adding}<ConnectServer {api} onClose={() => (adding = false)} onConnected={serverConnected} />{/if}
   {#if connection}<dialog
       use:modal
       class="form-dialog"
@@ -872,7 +843,7 @@
         <dt>Conexión</dt>
         <dd>{connection.user} · puerto {connection.port}</dd>
         <dt>Clave SSH</dt>
-        <dd>{connection.identity || 'Configuración de OpenSSH'}</dd>
+        <dd>{connection.managedSSH ? 'Clave dedicada gestionada por Nodes' : connection.identity || 'Configuración de OpenSSH'}</dd>
         <dt>Última lectura</dt>
         <dd>{age(connection.state.sample?.at, now)}</dd>
       </dl>

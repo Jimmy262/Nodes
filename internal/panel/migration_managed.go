@@ -331,6 +331,160 @@ func (a *App) checkSwarmResources(ctx context.Context, p *operationPlan) error {
 	}
 	return nil
 }
+
+// Normalize static configuration keys so alternate casing cannot hide inherited
+// HTTP policy. Ambiguous keys need explicit adoption rather than precedence.
+func nativeSwarmStaticConfig(values map[string]any) (map[string]any, error) {
+	normalized := map[string]any{}
+	for key, value := range values {
+		key = strings.ToLower(key)
+		if _, exists := normalized[key]; exists {
+			return nil, errors.New("La configuración del proxy tiene claves ambiguas")
+		}
+		if nested, ok := value.(map[string]any); ok {
+			var err error
+			value, err = nativeSwarmStaticConfig(nested)
+			if err != nil {
+				return nil, err
+			}
+		}
+		normalized[key] = value
+	}
+	return normalized, nil
+}
+
+func nativeSwarmSourceProxy(raw string) (proxyOptions, error) {
+	proxy := parseProxyOptions(raw)
+	unsupported := errors.New("El proxy original usa entradas privadas o políticas heredadas que requieren una adopción específica antes del traslado")
+	if !proxy.Available || proxy.HTTPEntry == "" || proxy.HTTPSEntry == "" {
+		return proxyOptions{}, unsupported
+	}
+	parts := strings.Split(raw, "\x1e")
+	var config map[string]any
+	if len(parts) != 3 || yaml.Unmarshal([]byte(parts[1]), &config) != nil {
+		return proxyOptions{}, unsupported
+	}
+	config, err := nativeSwarmStaticConfig(config)
+	if err != nil {
+		return proxyOptions{}, err
+	}
+	for _, name := range []string{proxy.HTTPEntry, proxy.HTTPSEntry} {
+		entry := object(object(config, "entrypoints"), strings.ToLower(name))
+		if entry == nil {
+			return proxyOptions{}, unsupported
+		}
+		if value, exists := entry["http"]; exists {
+			http, ok := value.(map[string]any)
+			if !ok {
+				return proxyOptions{}, unsupported
+			}
+			// Inherited middleware, TLS defaults and other HTTP entrypoint
+			// settings are not copied. Even a redirect may lead to a private
+			// entrypoint. Require explicit adoption for any such defaults.
+			if len(http) != 0 {
+				return proxyOptions{}, unsupported
+			}
+		}
+	}
+	return proxy, nil
+}
+
+// Native migration rebuilds task-provider labels instead of copying them. Only
+// accept the routing subset it can recreate without dropping access controls.
+func nativeSwarmRoutePort(spec map[string]any, proxy proxyOptions) (int, error) {
+	unsupported := errors.New("La ruta nativa usa autenticación, reglas u opciones de proxy que requieren una adopción específica antes del traslado")
+	// Service-provider labels are retained by targetSwarmSpec, whereas task
+	// labels are replaced. They cannot be treated as interchangeable policies.
+	for key := range object(spec, "Labels") {
+		if strings.HasPrefix(strings.ToLower(key), "traefik.") {
+			return 0, unsupported
+		}
+	}
+	labels := object(object(object(spec, "TaskTemplate"), "ContainerSpec"), "Labels")
+	if stringValue(labels, "traefik.enable") != "true" {
+		return 0, unsupported
+	}
+	routers := map[string]map[string]string{}
+	services := map[string]int{}
+	redirects := map[string]bool{}
+	port := 0
+	for key, value := range labels {
+		if !strings.HasPrefix(strings.ToLower(key), "traefik.") {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok || text == "" || key != strings.ToLower(key) {
+			return 0, unsupported
+		}
+		if key == "traefik.enable" || key == "traefik.docker.network" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(key, "traefik.http.routers."):
+			name, field, ok := strings.Cut(strings.TrimPrefix(key, "traefik.http.routers."), ".")
+			if !ok || !swarmNamePattern.MatchString(name) {
+				return 0, unsupported
+			}
+			switch field {
+			case "rule", "service", "entrypoints", "middlewares", "tls.certresolver":
+			case "tls":
+				if text != "true" {
+					return 0, unsupported
+				}
+			default:
+				return 0, unsupported
+			}
+			if routers[name] == nil {
+				routers[name] = map[string]string{}
+			}
+			routers[name][field] = text
+		case strings.HasPrefix(key, "traefik.http.services."):
+			name, field, ok := strings.Cut(strings.TrimPrefix(key, "traefik.http.services."), ".")
+			if !ok || !swarmNamePattern.MatchString(name) || field != "loadbalancer.server.port" {
+				return 0, unsupported
+			}
+			n, err := strconv.Atoi(text)
+			if err != nil || n < 1 || n > 65535 || (port != 0 && port != n) {
+				return 0, errors.New("Las rutas nativas necesitan un único puerto de proxy válido")
+			}
+			services[name], port = n, n
+		case strings.HasPrefix(key, "traefik.http.middlewares."):
+			name, field, ok := strings.Cut(strings.TrimPrefix(key, "traefik.http.middlewares."), ".")
+			// A name such as redirect-to-https alone does not establish its
+			// behavior. Require the local, complete redirect-only definition.
+			if !ok || !swarmNamePattern.MatchString(name) || field != "redirectscheme.scheme" || text != "https" {
+				return 0, unsupported
+			}
+			redirects[name] = true
+		default:
+			return 0, unsupported
+		}
+	}
+	if port == 0 || len(routers) == 0 {
+		return 0, errors.New("El servicio adoptado no tiene una ruta de proxy identificable")
+	}
+	for _, router := range routers {
+		if !regexp.MustCompile("^Host\\(`[^`]+`\\)$").MatchString(router["rule"]) || services[router["service"]] == 0 {
+			return 0, unsupported
+		}
+		entry := proxy.HTTPEntry
+		if router["tls"] == "true" {
+			entry = proxy.HTTPSEntry
+		}
+		if entry == "" || router["entrypoints"] != entry {
+			return 0, unsupported
+		}
+		if middlewares := router["middlewares"]; middlewares != "" {
+			for _, middleware := range strings.Split(middlewares, ",") {
+				if !redirects[strings.TrimSpace(middleware)] {
+					return 0, unsupported
+				}
+			}
+		}
+	}
+	return port, nil
+}
+
 func (a *App) swarmRoute(ctx context.Context, s Server, name string) (int, string, error) {
 	var adopted int
 	if err := a.db.QueryRow("SELECT count(*) FROM native_swarm_apps WHERE server_id=? AND service_name=?", s.ID, name).Scan(&adopted); err != nil {
@@ -342,26 +496,22 @@ func (a *App) swarmRoute(ctx context.Context, s Server, name string) (int, strin
 			return 0, "", err
 		}
 		labels := object(object(object(service.Spec, "TaskTemplate"), "ContainerSpec"), "Labels")
-		if stringValue(labels, "lat.nodo.managed") == "true" {
-			port := 0
-			for key, value := range labels {
-				if strings.HasSuffix(key, ".loadbalancer.server.port") && strings.HasPrefix(key, "traefik.http.services.") {
-					textValue, ok := value.(string)
-					if !ok {
-						return 0, "", errors.New("Puerto de proxy inválido")
-					}
-					n, err := strconv.Atoi(textValue)
-					if err != nil || n < 1 || n > 65535 || (port > 0 && port != n) {
-						return 0, "", errors.New("Las rutas nativas tienen puertos distintos")
-					}
-					port = n
-				}
-			}
-			if port > 0 {
-				return port, specHash(labels), nil
-			}
-			return 0, "", errors.New("El servicio adoptado no tiene un puerto de proxy identificable")
+		if stringValue(labels, "lat.nodo.managed") != "true" {
+			return 0, "", errors.New("El servicio adoptado perdió su marcador de Nodo; revisa su ruta antes del traslado")
 		}
+		raw, err := a.run(ctx, s, traefikOptionsCommand)
+		if err != nil {
+			return 0, "", errors.New("No se pudo revisar el proxy original del servicio adoptado")
+		}
+		proxy, err := nativeSwarmSourceProxy(raw)
+		if err != nil {
+			return 0, "", err
+		}
+		port, err := nativeSwarmRoutePort(service.Spec, proxy)
+		if err != nil {
+			return 0, "", err
+		}
+		return port, hashBytes([]byte(specHash(labels) + "\x00" + raw)), nil
 	}
 	raw, e := a.run(ctx, s, "cat -- "+shellQuote("/etc/dokploy/traefik/dynamic/"+name+".yml"))
 	if e != nil {

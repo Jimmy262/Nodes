@@ -4,6 +4,7 @@ web/dist/*
 !web/dist/.gitkeep
 data/
 bin/
+output/
 *.log
 __pycache__/
 *.pyc
@@ -41,6 +42,11 @@ Thumbs.db
 
 # Pruebas e informes locales: no forman parte de la publicación
 *_test.go
+!internal/panel/security_compose_test.go
+!internal/panel/security_links_test.go
+!internal/panel/security_swarm_auth_test.go
+!internal/panel/security_auth_test.go
 web/tests/
 scripts/test_*.py
+!scripts/test_github_deploy.py
 docs/REVISION-TECNICA.md

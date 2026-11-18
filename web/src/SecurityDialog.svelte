@@ -1,51 +1,65 @@
 <script>
   import { onMount } from 'svelte';
-  import { X, ShieldCheck, LogOut, KeyRound } from '@lucide/svelte';
+  import { X, ShieldCheck, LogOut, Fingerprint, Plus, Trash2 } from '@lucide/svelte';
   import { modal } from './format.js';
+  import { usePasskey } from './lib/passkeys.js';
   export let api;
   export let onClose;
   export let onLogout;
   export let onSignedOut;
   let session = null,
+    keys = [],
     error = '',
     message = '',
-    changing = false,
     busy = false;
-  let currentPassword = '',
-    password = '',
-    confirmation = '';
+  let name = '',
+    adding = false,
+    removing = '';
   let active = true;
+  async function load() {
+    const [current, passkeys] = await Promise.all([api('/session'), api('/auth/passkeys')]);
+    if (active) {
+      session = current;
+      keys = passkeys;
+    }
+  }
   onMount(() => {
-    api('/session')
-      .then((data) => {
-        if (active) session = data;
-      })
-      .catch((e) => {
-        if (active) error = e.message;
-      });
-    return () => (active = false);
+    load().catch((e) => {
+      if (active) error = e.message;
+    });
+    return () => {
+      active = false;
+    };
   });
-  async function change(event) {
+  async function add(event) {
     event.preventDefault();
+    busy = true;
     error = '';
     message = '';
-    if (password !== confirmation) {
-      error = 'Los PIN no coinciden';
-      return;
-    }
-    busy = true;
     try {
-      const data = await api('/auth/password', {
-        method: 'POST',
-        retainSessionOn401: true,
-        body: JSON.stringify({ currentPassword, password, confirmPassword: confirmation }),
-      });
-      session = data;
-      currentPassword = '';
-      password = '';
-      confirmation = '';
-      changing = false;
-      message = 'PIN actualizado. Las otras sesiones quedaron cerradas.';
+      session = await usePasskey(api, { remember: session?.remember ?? true });
+      session = await usePasskey(api, { register: true, remember: session.remember, name });
+      await load();
+      adding = false;
+      name = '';
+      message = 'Passkey añadida. Ya puedes usarla para entrar.';
+    } catch (e) {
+      error = e.message;
+    } finally {
+      busy = false;
+    }
+  }
+  async function remove(id) {
+    busy = true;
+    error = '';
+    message = '';
+    try {
+      session = await usePasskey(api, { remember: session?.remember ?? true });
+      await api(`/auth/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      removing = '';
+      await load();
+      message =
+        'Passkey eliminada y otras sesiones cerradas. Puedes borrarla también de tu gestor de passkeys.';
     } catch (e) {
       error = e.message;
     } finally {
@@ -63,6 +77,9 @@
     } finally {
       busy = false;
     }
+  }
+  function date(seconds) {
+    return new Date(seconds * 1000).toLocaleDateString('es-PE');
   }
 </script>
 
@@ -87,90 +104,124 @@
             ? 'Este navegador recuerda tu sesión'
             : 'Sesión del navegador'
           : 'Comprobando sesión…'}</strong
-      >{#if session}<p>
-          Válida hasta el {new Date(session.expiresAt).toLocaleString('es-PE', {
-            day: 'numeric',
-            month: 'long',
-            hour: '2-digit',
-            minute: '2-digit',
-          })}.
-        </p>
-        <p>Reiniciar Nodes no cierra esta sesión.</p>{/if}
+      >
+      {#if session}<p>
+          Válida hasta el {new Date(session.expiresAt).toLocaleString('es-PE')}.
+        </p>{/if}
     </div>
   </div>
   {#if message}<p class="notice success" role="status">{message}</p>{/if}
   {#if error}<p class="notice error" role="alert">{error}</p>{/if}
-  {#if changing}
-    <form on:submit={change}>
-      <label class="field"
-        >PIN actual<input
-          type="password"
-          bind:value={currentPassword}
-          autocomplete="current-password"
-          required
-          maxlength="8"
-          inputmode="numeric"
-          pattern={'[0-9]{8}'}
-          title="Escribe exactamente 8 números"
-        /></label
-      >
-      <label class="field"
-        >Nuevo PIN<input
-          type="password"
-          bind:value={password}
-          autocomplete="new-password"
-          required
-          minlength="8"
-          maxlength="8"
-          inputmode="numeric"
-          pattern={'[0-9]{8}'}
-          title="Escribe exactamente 8 números"
-          placeholder="8 números"
-        /></label
-      >
-      <label class="field"
-        >Repite el nuevo PIN<input
-          type="password"
-          bind:value={confirmation}
-          autocomplete="new-password"
-          required
-          minlength="8"
-          maxlength="8"
-          inputmode="numeric"
-          pattern={'[0-9]{8}'}
-          title="Repite los mismos 8 números"
-        /></label
-      >
-      <p class="small muted">Al cambiarlo, se cerrarán las demás sesiones.</p>
-      <div class="button-row spaced">
-        <button class="primary" disabled={busy}>{busy ? 'Guardando…' : 'Guardar PIN'}</button
-        ><button
-          type="button"
-          class="secondary"
-          disabled={busy}
+  <h3>Tus passkeys</h3>
+  <p class="small muted">
+    Registra una segunda passkey para conservar el acceso si pierdes un dispositivo.
+  </p>
+  <ul class="passkey-list">
+    {#each keys as key (key.id)}
+      <li>
+        <Fingerprint size={20} />
+        <div>
+          <strong>{key.name}</strong>
+          <p class="small muted">
+            Creada: {date(key.createdAt)} · Último uso: {date(key.lastUsedAt)}
+          </p>
+        </div>
+        <button
+          class="icon-button"
+          disabled={busy || keys.length < 2}
+          aria-label={`Eliminar ${key.name}`}
+          title={keys.length < 2
+            ? 'Registra otra passkey antes de eliminar esta'
+            : 'Eliminar passkey'}
           on:click={() => {
-            changing = false;
-            currentPassword = '';
-            password = '';
-            confirmation = '';
-            error = '';
-          }}>Cancelar</button
+            removing = key.id;
+            adding = false;
+          }}><Trash2 size={17} /></button
+        >
+      </li>
+      {#if removing === key.id}
+        <li class="passkey-confirm">
+          <p>¿Eliminar «{key.name}»? Se cerrarán las otras sesiones.</p>
+          <div class="button-row">
+            <button class="secondary danger-text" disabled={busy} on:click={() => remove(key.id)}
+              >{busy ? 'Verificando…' : 'Verificar y eliminar'}</button
+            ><button class="secondary" disabled={busy} on:click={() => (removing = '')}
+              >Cancelar</button
+            >
+          </div>
+        </li>
+      {/if}
+    {/each}
+  </ul>
+  {#if adding}
+    <form on:submit={add}>
+      <label class="field"
+        >Nombre de la passkey<input
+          bind:value={name}
+          maxlength="80"
+          placeholder="Por ejemplo, mi celular"
+          required
+          disabled={busy}
+        /></label
+      >
+      <p class="small muted">
+        Primero verificaremos tu acceso actual; después podrás guardar la nueva passkey.
+      </p>
+      <div class="button-row spaced">
+        <button class="primary" disabled={busy}
+          >{busy ? 'Esperando tu dispositivo…' : 'Continuar'}</button
+        ><button type="button" class="secondary" disabled={busy} on:click={() => (adding = false)}
+          >Cancelar</button
         >
       </div>
     </form>
-  {:else}<button
+  {:else}
+    <button
       class="secondary"
+      disabled={busy || !session || keys.length >= 10}
       on:click={() => {
-        changing = true;
-        error = '';
-        message = '';
-      }}><KeyRound size={16} />Cambiar PIN</button
-    >{/if}
+        adding = true;
+        removing = '';
+      }}><Plus size={16} />Añadir passkey</button
+    >
+  {/if}
   <div class="security-actions">
     <button class="text-button" disabled={busy} on:click={onLogout}
       ><LogOut size={16} />Cerrar esta sesión</button
-    ><button class="text-button danger-text" disabled={busy} on:click={logoutAll}
+    >
+    <button class="text-button danger-text" disabled={busy} on:click={logoutAll}
       >Cerrar todas las sesiones</button
     >
   </div>
 </dialog>
+
+<style>
+  .passkey-list {
+    list-style: none;
+    margin: 1rem 0;
+    padding: 0;
+  }
+  .passkey-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.8rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .passkey-list li > div {
+    flex: 1;
+    min-width: 0;
+  }
+  .passkey-list strong {
+    overflow-wrap: anywhere;
+  }
+  .passkey-list p {
+    margin: 0.25rem 0 0;
+  }
+  .passkey-list .passkey-confirm {
+    display: block;
+  }
+  .passkey-confirm .button-row {
+    margin-top: 0.7rem;
+  }
+</style>

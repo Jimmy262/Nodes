@@ -42,9 +42,11 @@ type applicationConfiguration struct {
 	PublicIP                string                 `json:"publicIp"`
 	appName, kind, recordID string
 	record                  map[string]any
+	swarm                   *editableSwarm
 	compose                 *editableCompose
 }
 type domainChange struct {
+	Remove    bool   `json:"remove"`
 	ID        string `json:"id"`
 	Host      string `json:"host"`
 	Automatic bool   `json:"automatic"`
@@ -64,6 +66,8 @@ type applicationEdit struct {
 	before                                 *applicationConfiguration
 	input                                  applicationEditInput
 	nameChanged, envChanged, domainChanged bool
+	swarmSpec                              map[string]any
+	routeBytes                             []byte
 	composeBytes                           []byte
 	variableFiles                          map[string][]byte
 	services                               []string
@@ -143,38 +147,9 @@ func (a *App) loadApplicationConfiguration(ctx context.Context, s Server, id str
 		return nil, nativeErr
 	} else if adopted {
 		// The definition belongs to Nodo; no API connection to Dokploy is needed.
-	} else if swarm != "" || strings.Contains(labels["com.docker.compose.project.working_dir"], "/etc/dokploy/") {
-		c.Manager = "Dokploy"
-		c.appName = project
-		c.kind = "compose"
-		if swarm != "" {
-			c.appName = swarm
-			c.kind = "application"
-		}
-		key, e := a.dokployKey(s)
-		if e != nil {
-			c.ConnectionRequired = true
-			c.Message = "Conecta Dokploy una vez para editar sus dominios y variables desde aquí."
-		} else {
-			defer clear(key)
-			if err = a.loadDokployConfiguration(ctx, s, key, c); err != nil {
-				c.ConnectionRequired = true
-				c.CanEdit = false
-				c.Message = err.Error()
-				c.EnvText = ""
-				c.record = nil
-				c.Domains = []editableDomain{}
-			} else {
-				seen := map[string]bool{}
-				for _, item := range items {
-					service := item.Labels["com.docker.compose.service"]
-					if service != "" && !seen[service] {
-						seen[service] = true
-						c.Environment = append(c.Environment, configurationService{Name: service, Variables: []envValue{}})
-					}
-				}
-				sort.Slice(c.Environment, func(i, j int) bool { return c.Environment[i].Name < c.Environment[j].Name })
-			}
+	} else if swarm != "" {
+		if err = a.loadSwarmConfiguration(ctx, s, c, swarm); err != nil {
+			return nil, err
 		}
 	} else if project != "" {
 		c.Manager = "Docker Compose"
@@ -197,7 +172,7 @@ func (a *App) loadApplicationConfiguration(ctx context.Context, s Server, id str
 	for _, d := range c.Domains {
 		domainSources = append(domainSources, d.raw)
 	}
-	b, _ := json.Marshal([]any{c.ID, c.Name, c.Manager, c.ConnectionRequired, c.Environment, c.EnvText, c.Domains, domainSources, c.record, c.compose})
+	b, _ := json.Marshal([]any{c.ID, c.Name, c.Manager, c.ConnectionRequired, c.Environment, c.EnvText, c.Domains, domainSources, c.record, c.compose, c.swarm})
 	c.Revision = hashBytes(b)
 	return c, nil
 }
@@ -319,7 +294,7 @@ func (a *App) applicationConfigurationPlan(w http.ResponseWriter, r *http.Reques
 	}
 	if in.Domain != nil {
 		if !c.CanEdit {
-			fail(w, 400, "Conecta el administrador del proyecto para cambiar su dominio")
+			fail(w, 400, "Este proyecto no admite cambios de dominio en su configuración actual")
 			return
 		}
 		d := in.Domain
@@ -336,13 +311,27 @@ func (a *App) applicationConfigurationPlan(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			d.Service = existing.Service
-			d.Port = existing.Port
-			d.HTTPS = existing.HTTPS
-			edit.domainChanged = d.Automatic || !strings.EqualFold(d.Host, existing.Host)
+			if d.Remove {
+				d.Host = existing.Host
+				d.Port = existing.Port
+				d.HTTPS = existing.HTTPS
+			}
+			edit.domainChanged = d.Remove || d.Automatic || !strings.EqualFold(d.Host, existing.Host) || d.Port != existing.Port || d.HTTPS != existing.HTTPS
 		} else {
 			edit.domainChanged = true
 		}
-		if edit.domainChanged {
+		if d.Remove {
+			if d.ID == "" {
+				fail(w, 400, "Selecciona el dominio que quieres eliminar")
+				return
+			}
+			p.Summary = append(p.Summary, "Eliminar dominio: "+d.Host)
+			p.Warnings = append(p.Warnings, "Este dominio dejará de abrir la aplicación. La aplicación y sus datos se conservan.")
+		} else if edit.domainChanged {
+			if d.Port < 1 || d.Port > 65535 {
+				fail(w, 400, "Indica el puerto interno de la aplicación (1–65535)")
+				return
+			}
 			if d.ID == "" && c.kind != "application" {
 				found := false
 				for _, service := range c.Environment {
@@ -360,13 +349,27 @@ func (a *App) applicationConfigurationPlan(w http.ResponseWriter, r *http.Reques
 				mode = "auto"
 			}
 			p.project = "app-" + p.ID[:12]
-			if e = a.prepareAccess(r.Context(), p, mode, d.Host, d.Service, d.Port, d.HTTPS); e != nil {
-				fail(w, 400, e.Error())
-				return
+			portOnly := false
+			for _, existing := range c.Domains {
+				if existing.ID == d.ID && !d.Automatic && strings.EqualFold(d.Host, existing.Host) && d.HTTPS == existing.HTTPS {
+					portOnly = true
+				}
 			}
-			d.Host = p.access.Domain
+			if !portOnly {
+				if e = a.prepareAccess(r.Context(), p, mode, d.Host, d.Service, d.Port, d.HTTPS); e != nil {
+					fail(w, 400, e.Error())
+					return
+				}
+				d.Host = p.access.Domain
+			}
 			p.Summary = append(p.Summary, "Dominio: "+d.Host)
-			if d.ID != "" {
+			p.Summary = append(p.Summary, fmt.Sprintf("Puerto interno: %d", d.Port))
+			if d.HTTPS {
+				p.Summary = append(p.Summary, "HTTPS con certificado automático habilitado.")
+			} else {
+				p.Summary = append(p.Summary, "Acceso HTTP sin certificado.")
+			}
+			if d.ID != "" && !editingCurrentDomain(p, d.Host) {
 				p.Warnings = append(p.Warnings, "El dominio anterior de esta ruta dejará de abrir la aplicación. Los otros dominios se conservarán.")
 			}
 		}
@@ -381,12 +384,12 @@ func (a *App) applicationConfigurationPlan(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		p.Warnings = append(p.Warnings, "Se recrearán los servicios modificados con las imágenes actuales. Puede haber una interrupción breve. Se conservarán los volúmenes y una copia de la configuración anterior.")
-	} else if c.CanEdit && (edit.envChanged || edit.domainChanged) {
-		if c.kind == "compose" {
-			p.Warnings = append(p.Warnings, "Dokploy volverá a desplegar este proyecto para aplicar los cambios. Puede reconstruir imágenes y causar una interrupción; sus opciones de despliegue se conservarán.")
-		} else if edit.envChanged {
-			p.Warnings = append(p.Warnings, "Dokploy recargará la aplicación con su imagen actual para aplicar las variables. Puede haber una interrupción breve.")
+	} else if c.kind == "swarm-native" && (edit.envChanged || edit.domainChanged) {
+		if e = prepareSwarmEdit(p); e != nil {
+			fail(w, 400, e.Error())
+			return
 		}
+		p.Warnings = append(p.Warnings, "Nodes actualizará Docker Swarm directamente. Puede haber una interrupción; se conservarán imagen, volúmenes y opciones no modificadas.", "No redespliegues esta aplicación desde Dokploy u otro administrador: podría sobrescribir estos cambios.")
 	} else {
 		p.Summary = append(p.Summary, "El nombre visible cambia sin renombrar contenedores, redes ni volúmenes.")
 	}
@@ -402,8 +405,8 @@ func (a *App) runApplicationEdit(ctx context.Context, p *operationPlan) error {
 	if err = a.recheckAccess(ctx, p); err != nil {
 		return err
 	}
-	if current.CanEdit && current.kind != "compose-file" {
-		if err = a.applyDokployEdit(ctx, p); err != nil {
+	if current.kind == "swarm-native" && (e.envChanged || e.domainChanged) {
+		if err = a.applySwarmEdit(ctx, p); err != nil {
 			return err
 		}
 	} else if e.envChanged || e.domainChanged {

@@ -1,6 +1,8 @@
 <script>
   import { onMount, tick } from 'svelte';
-  import { X, RefreshCw, Keyboard, Send, SquareTerminal } from '@lucide/svelte';
+  import { X, RefreshCw, Keyboard, Send, Folder, SquareTerminal, Copy } from '@lucide/svelte';
+  import ProviderIcon from './ProviderIcon.svelte';
+  import TerminalFolders from './TerminalFolders.svelte';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import '@xterm/xterm/css/xterm.css';
@@ -19,8 +21,8 @@
     connected = false;
   let requirements = null,
     installPlan = null,
-    installAck = false,
     installPending = false;
+  let installPackage = '';
   let installJob = null,
     installMessage = '',
     pollingInstall = false;
@@ -31,6 +33,56 @@
     stableTimer;
   let resizeFrame = null;
   let controlsOpen = false;
+  let foldersOpen = false,
+    directory = '',
+    connectionVersion = 0;
+  let localOpen = false,
+    localOptions = null,
+    localPending = false,
+    localMessage = '';
+  async function toggleLocal() {
+    localOpen = !localOpen;
+    if (!localOpen) return;
+    localPending = true;
+    localMessage = '';
+    localOptions = null;
+    try {
+      localOptions = await api(
+        `/servers/${server.id}/terminal/local?directory=${encodeURIComponent(directory)}`,
+      );
+    } catch (e) {
+      localMessage = e.message;
+    } finally {
+      localPending = false;
+      await tick();
+      resize();
+    }
+  }
+  async function openLocal() {
+    localPending = true;
+    localMessage = '';
+    try {
+      await api(`/servers/${server.id}/terminal/local`, {
+        method: 'POST',
+        body: JSON.stringify({ directory }),
+      });
+      localMessage = 'Se abrió PowerShell con una nueva conexión SSH.';
+    } catch (e) {
+      localMessage = e.message;
+    } finally {
+      localPending = false;
+    }
+  }
+  async function copyLocal() {
+    try {
+      await navigator.clipboard.writeText(localOptions.command);
+      localMessage = 'Comando copiado. Pégalo en tu terminal.';
+    } catch {
+      localMessage = 'Selecciona y copia el comando que aparece debajo.';
+    }
+  }
+  $: providerName = kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : 'Terminal';
+  $: agent = kind === 'codex' || kind === 'claude';
   let height = window.innerHeight - 24;
   const keys = [
     ['Ctrl+C', '\x03', 'Interrumpir con Ctrl+C'],
@@ -86,22 +138,22 @@
     event.preventDefault();
     if (!draft.trim()) return;
     const text = draft.replace(/\r\n/g, '\n');
-    const data =
-      kind === 'codex' ? `\x1b[200~${text}\x1b[201~\r` : text.replace(/\n/g, '\r') + '\r';
+    const data = agent ? `\x1b[200~${text}\x1b[201~\r` : text.replace(/\n/g, '\r') + '\r';
     if (send(data)) draft = '';
   }
   async function connect() {
     if (!active || connecting || connected || socket?.readyState === WebSocket.CONNECTING) return;
     connecting = true;
+    const version = connectionVersion;
     clearTimeout(retryTimer);
     error = '';
     state = attempts ? 'Reconectando' : 'Conectando';
     try {
       const session = await api(`/servers/${server.id}/terminal`, {
         method: 'POST',
-        body: JSON.stringify({ kind }),
+        body: JSON.stringify({ kind, directory }),
       });
-      if (!active) return;
+      if (!active || version !== connectionVersion) return;
       if (session.requirements) {
         requirements = session.requirements;
         state = 'Requisitos pendientes';
@@ -114,7 +166,7 @@
       socket = ws;
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
-        if (!active) {
+        if (!active || version !== connectionVersion) {
           ws.close();
           return;
         }
@@ -127,10 +179,11 @@
         resize();
       };
       ws.onmessage = ({ data }) => {
-        if (!active) return;
+        if (!active || version !== connectionVersion) return;
         if (data instanceof ArrayBuffer) term.write(new Uint8Array(data));
       };
       ws.onclose = (event) => {
+        if (version !== connectionVersion) return;
         clearTimeout(stableTimer);
         connected = false;
         if (!active) return;
@@ -149,49 +202,70 @@
         }
       };
       ws.onerror = () => {
-        state = 'No se pudo conectar';
+        if (version === connectionVersion) state = 'No se pudo conectar';
       };
     } catch (e) {
-      if (active) {
+      if (active && version === connectionVersion) {
         state = 'No se pudo conectar';
         error = e.message;
       }
     } finally {
-      connecting = false;
+      if (version === connectionVersion) connecting = false;
     }
   }
-  async function reviewInstall(packageID) {
+  function openDirectory(path) {
+    localOpen = false;
+    localOptions = null;
+    connectionVersion++;
+    clearTimeout(retryTimer);
+    clearTimeout(stableTimer);
+    socket?.close(1000, 'Cambio de carpeta');
+    socket = null;
+    connected = false;
+    connecting = false;
+    attempts = 0;
+    directory = path;
+    foldersOpen = false;
+    term?.reset();
+    connect();
+  }
+  async function installDependency(dependency) {
     if (installPending || installJob) return;
     installPending = true;
+    installPackage = dependency.id;
+    installMessage = `Preparando la instalación de ${dependency.name}…`;
     error = '';
     try {
       if (installPlan) await api(`/operations/${installPlan.id}/plan`, { method: 'DELETE' });
       installPlan = await api(`/servers/${server.id}/terminal/install/plan`, {
         method: 'POST',
-        body: JSON.stringify({ package: packageID }),
+        body: JSON.stringify({ package: dependency.id }),
       });
-      installAck = false;
-    } catch (e) {
-      if (active) error = e.message;
-    } finally {
-      installPending = false;
-    }
-  }
-  async function executeInstall() {
-    if (!installPlan || !installAck || installPending || installJob) return;
-    installPending = true;
-    error = '';
-    try {
+      if (!active) return;
+      if (
+        installPlan.kind !== 'terminal-install' ||
+        installPlan.name !== dependency.name ||
+        installPlan.blockers?.length
+      )
+        throw new Error('La preparación cambió. Comprueba los requisitos y vuelve a intentarlo.');
       const result = await api(`/operations/${installPlan.id}/execute`, {
         method: 'POST',
-        body: JSON.stringify({ name: installPlan.name, acknowledged: installAck }),
+        body: JSON.stringify({ name: installPlan.name, acknowledged: true }),
       });
       installJob = result.id;
       installMessage = 'Instalación en curso. Puedes seguirla también en Actividad.';
       installPlan = null;
+      if (active) pollInstallation();
     } catch (e) {
-      if (active) error = e.message;
+      if (active) {
+        error = e.message;
+        installMessage = '';
+      }
     } finally {
+      if (installPlan) {
+        await api(`/operations/${installPlan.id}/plan`, { method: 'DELETE' }).catch(() => {});
+        installPlan = null;
+      }
       installPending = false;
     }
   }
@@ -206,6 +280,7 @@
       installMessage = job.message;
       if (job.status !== 'running') {
         installJob = null;
+        installPackage = '';
         requirements = await api(`/servers/${server.id}/terminal/options`);
         if (job.status === 'succeeded') connect();
         else error = job.message;
@@ -271,11 +346,12 @@
   on:cancel|preventDefault
 >
   <header class="terminal-header">
-    <h2 id="terminal-title">
-      <SquareTerminal size={17} /><span
-        >{kind === 'codex' ? 'Codex' : 'Terminal'} · {server.name}</span
-      >
+    <h2 id="terminal-title" aria-label={`${providerName} · ${server.name}`} title={providerName}>
+      <ProviderIcon {kind} size={19} /><span>{server.name}</span>
     </h2>
+    {#if directory}<span class="terminal-start-directory" title={`Carpeta de inicio: ${directory}`}
+        >{directory}</span
+      >{/if}
     <span
       class="terminal-connection"
       class:is-connected={connected}
@@ -284,6 +360,27 @@
       title={state}><i aria-hidden="true"></i><span>{state}</span></span
     >
     <div class="terminal-actions">
+      <button
+        type="button"
+        class="icon-button"
+        class:active={foldersOpen}
+        disabled={!!requirements || connecting || installPending || !!installJob}
+        aria-label={foldersOpen ? 'Ocultar carpetas' : 'Explorar carpetas'}
+        aria-expanded={foldersOpen}
+        title="Explorar carpetas del servidor"
+        on:click={() => (foldersOpen = !foldersOpen)}><Folder size={18} /></button
+      >
+      <button
+        type="button"
+        class="icon-button"
+        class:active={localOpen}
+        disabled={localPending}
+        aria-label="Abrir SSH en mi PC"
+        title="Abrir SSH en mi PC"
+        aria-expanded={localOpen}
+        aria-controls="local-ssh-options"
+        on:click={toggleLocal}><SquareTerminal size={18} /></button
+      >
       {#if !connected && !requirements}<button
           type="button"
           class="icon-button"
@@ -317,45 +414,78 @@
       >
     </div>
   </header>
+  {#if localOpen}<section
+      id="local-ssh-options"
+      class="terminal-local-options"
+      aria-label="SSH en tu PC"
+    >
+      <strong>SSH en mi PC</strong>
+      <p class="small muted">
+        Abre una conexión SSH independiente para ejecutar comandos en el servidor desde tu terminal.
+      </p>
+      {#if localOptions}
+        <div class="terminal-local-actions">
+          {#if localOptions.available}<button
+              class="secondary"
+              disabled={localPending}
+              on:click={openLocal}><SquareTerminal size={15} />Abrir PowerShell</button
+            >{/if}
+          <button class="secondary" disabled={localPending} on:click={copyLocal}
+            ><Copy size={15} />Copiar comando SSH</button
+          >
+        </div>
+        <textarea
+          class="terminal-local-command"
+          aria-label="Comando para conectar por SSH"
+          readonly
+          value={localOptions.command}
+          rows="2"
+          spellcheck="false"></textarea>
+        {#if !localOptions.available}<p class="small muted">
+            Copia el comando en tu PC. La apertura directa de PowerShell está disponible al usar
+            Nodes en Windows por localhost.
+          </p>{/if}
+      {:else if localPending}<p role="status">Preparando conexión…</p>{/if}
+      {#if localMessage}<p class="small" role="status">{localMessage}</p>{/if}
+    </section>{/if}
   {#if error}<div class="terminal-feedback" role="alert">{error}</div>{/if}
   {#if requirements}<section class="terminal-requirements" aria-label="Requisitos del servidor">
-      <h3>Preparar {kind === 'codex' ? 'Codex' : 'la terminal'} en {server.name}</h3>
+      <h3>Preparar {providerName} en {server.name}</h3>
       <p>
-        Comprueba e instala los requisitos que faltan. Cada instalación se revisa antes de
-        ejecutarse.
+        Instala lo que falta desde aquí. Se descargarán los paquetes oficiales en este servidor.
       </p>
-      {#each requirements.dependencies.filter((dependency) => kind === 'codex' || dependency.id === 'tmux') as dependency}
+      {#each requirements.dependencies.filter((dependency) => dependency.id === 'tmux' || (agent && (dependency.id === 'nodejs' || dependency.id === kind))) as dependency}
         <div class="terminal-dependency">
           <div>
             <strong>{dependency.name}</strong>
             <p>{dependency.installed ? 'Instalado' : dependency.reason || 'Falta instalar'}</p>
           </div>
           {#if !dependency.installed}<button
-              class="secondary"
+              class="primary"
+              aria-label={`Instalar ${dependency.name} en ${server.name}`}
               disabled={!dependency.canInstall || installPending || !!installJob}
-              on:click={() => reviewInstall(dependency.id)}>Revisar instalación</button
+              on:click={() => installDependency(dependency)}
+              >{installPackage === dependency.id && (installPending || installJob)
+                ? installJob
+                  ? 'Instalando…'
+                  : 'Preparando…'
+                : 'Instalar'}</button
             >{/if}
         </div>
       {/each}
-      {#if installPlan}<div class="terminal-install-review">
-          <h3>Instalar {installPlan.name}</h3>
-          <ul>
-            {#each installPlan.summary as effect}<li>{effect}</li>{/each}
-          </ul>
-          {#each installPlan.warnings as warning}<p class="small">{warning}</p>{/each}
-          <label class="terminal-install-ack"
-            ><input type="checkbox" bind:checked={installAck} />Acepto estos cambios en {server.name}.</label
-          >
-          <button
-            class="primary"
-            disabled={!installAck || installPending || !!installJob}
-            on:click={executeInstall}>Confirmar e instalar</button
-          >
-        </div>{/if}
+      {#if agent}<p class="small muted">
+          Se instala para el usuario SSH. La autenticación en {providerName} se realiza después, al abrirlo.
+        </p>{/if}
       {#if installMessage}<p role="status">{installMessage}</p>{/if}
     </section>{/if}
-  <div class="terminal-surface" class:terminal-hidden={!!requirements}>
-    <div class="terminal-viewport" bind:this={surface}></div>
+  <div class="terminal-workspace" class:terminal-hidden={!!requirements}>
+    {#if foldersOpen}<TerminalFolders
+        {api}
+        {server}
+        initialPath={directory}
+        onSelect={openDirectory}
+      />{/if}
+    <div class="terminal-surface"><div class="terminal-viewport" bind:this={surface}></div></div>
   </div>
   {#if controlsOpen && !requirements}
     <section id="terminal-controls" class="terminal-controls" aria-label="Controles de terminal">
@@ -373,15 +503,15 @@
       </div>
       <form class="terminal-composer" on:submit={submit}>
         <label class="sr-only" for="terminal-message"
-          >{kind === 'codex' ? 'Instrucciones para Codex' : 'Comando del servidor'}</label
+          >{agent ? `Instrucciones para ${providerName}` : 'Comando del servidor'}</label
         >
         <textarea
           id="terminal-message"
           bind:value={draft}
           maxlength="4000"
           rows="1"
-          placeholder={kind === 'codex'
-            ? 'Escribe instrucciones para Codex…'
+          placeholder={agent
+            ? `Escribe instrucciones para ${providerName}…`
             : 'Escribe un comando…'}
           autocapitalize="off"
           autocomplete="off"

@@ -20,12 +20,16 @@ import (
 )
 
 type Server struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Identity string `json:"identity"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	User          string `json:"user"`
+	Identity      string `json:"identity"`
+	ManagedSSH    bool   `json:"managedSSH,omitempty"`
+	sshIdentity   string
+	sshKnownHosts string
+	sshKeyID      string
 }
 type Sample struct {
 	At           string  `json:"at"`
@@ -48,24 +52,29 @@ type State struct {
 	Sample *Sample `json:"sample,omitempty"`
 }
 type App struct {
-	db               *sql.DB
-	setupToken       string
-	setupUntil       time.Time
-	authMu           sync.Mutex
-	mu               sync.RWMutex
-	states           map[int64]State
-	docker           map[int64]DockerSnapshot
-	run              func(context.Context, Server, string) (string, error)
-	operations       *operationManager
-	stream           func(context.Context, Server, string, io.Reader, io.Writer) error
-	githubHTTP       *http.Client
-	terminalContext  context.Context
-	terminalCancel   context.CancelFunc
-	terminalSlots    chan struct{}
-	startTerminal    func(context.Context, Server, string) (terminalBackend, error)
-	publicOrigin     string
-	swarmDNS         func(context.Context, string, string) domainStatus
-	preparationSlots chan struct{}
+	db                  *sql.DB
+	setupToken          string
+	setupExpires        time.Time
+	setupGrant          string
+	setupUntil          time.Time
+	authMu              sync.Mutex
+	mu                  sync.RWMutex
+	states              map[int64]State
+	docker              map[int64]DockerSnapshot
+	run                 func(context.Context, Server, string) (string, error)
+	operations          *operationManager
+	stream              func(context.Context, Server, string, io.Reader, io.Writer) error
+	githubHTTP          *http.Client
+	terminalContext     context.Context
+	terminalCancel      context.CancelFunc
+	terminalSlots       chan struct{}
+	startTerminal       func(context.Context, Server, string) (terminalBackend, error)
+	launchLocalTerminal func(Server, string) error
+	publicOrigin        string
+	swarmDNS            func(context.Context, string, string) domainStatus
+	preparationSlots    chan struct{}
+	sshMu               sync.Mutex
+	managedSSH          map[string]managedSSHFiles
 }
 
 func New(path, setupToken string) (*App, error) {
@@ -73,14 +82,14 @@ func New(path, setupToken string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{db: db, setupToken: setupToken, states: map[int64]State{}, docker: map[int64]DockerSnapshot{}, run: runSSH, stream: streamSSH}
+	a := &App{db: db, setupToken: setupToken, setupExpires: time.Now().Add(setupDuration), states: map[int64]State{}, docker: map[int64]DockerSnapshot{}, run: runSSH, stream: streamSSH}
 	a.operations = newOperationManager()
 	a.preparationSlots = make(chan struct{}, 2)
 	a.terminalContext, a.terminalCancel = context.WithCancel(context.Background())
 	a.terminalSlots = make(chan struct{}, 8)
 	return a, nil
 }
-func (a *App) Close() { a.terminalCancel(); a.operations.close(); a.db.Close() }
+func (a *App) Close() { a.terminalCancel(); a.operations.close(); a.closeManagedSSH(); a.db.Close() }
 func reply(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -105,21 +114,32 @@ func (a *App) Handler(files fs.FS) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/auth/status", a.authStatus)
 	mux.HandleFunc("POST /api/auth/prepare", a.prepareSetup)
-	mux.HandleFunc("POST /api/auth/setup", a.setupPassword)
-	mux.HandleFunc("POST /api/login", a.login)
+	mux.HandleFunc("POST /api/auth/passkeys/register/begin", a.beginPasskeyRegistration)
+	mux.HandleFunc("POST /api/auth/passkeys/register/finish", a.finishPasskeyRegistration)
+	mux.HandleFunc("POST /api/auth/passkeys/login/begin", a.beginPasskeyLogin)
+	mux.HandleFunc("POST /api/auth/passkeys/login/finish", a.finishPasskeyLogin)
+	mux.HandleFunc("GET /api/auth/passkeys", a.listPasskeys)
+	mux.HandleFunc("DELETE /api/auth/passkeys/{id}", a.deletePasskey)
 	mux.HandleFunc("GET /api/session", a.authStatus)
+	mux.HandleFunc("GET /api/nodes-update", a.nodesUpdateStatus)
+	mux.HandleFunc("POST /api/nodes-update", a.limitPreparation(a.requestNodesUpdate))
 	mux.HandleFunc("POST /api/logout", a.logout)
-	mux.HandleFunc("POST /api/auth/password", a.changePassword)
 	mux.HandleFunc("POST /api/auth/logout-all", a.logoutAll)
 	mux.HandleFunc("GET /api/servers", a.list)
 	mux.HandleFunc("GET /api/overview", a.overview)
 	mux.HandleFunc("POST /api/servers", a.create)
+	mux.HandleFunc("POST /api/servers/ssh/probe", a.limitPreparation(a.probeServerSSH))
+	mux.HandleFunc("POST /api/servers/connect", a.limitPreparation(a.connectServerSSH))
 	mux.HandleFunc("PATCH /api/servers/{id}", a.rename)
 	mux.HandleFunc("DELETE /api/servers/{id}", a.remove)
 	mux.HandleFunc("GET /api/servers/{id}/history", a.history)
 	mux.HandleFunc("POST /api/servers/{id}/check", a.check)
 	mux.HandleFunc("POST /api/servers/{id}/terminal", a.prepareTerminal)
+	mux.HandleFunc("POST /api/github/deployments/{deployment}/push/plan", a.limitPreparation(a.githubPushPlan))
+	mux.HandleFunc("GET /api/servers/{id}/terminal/local", a.localTerminalOptions)
+	mux.HandleFunc("POST /api/servers/{id}/terminal/local", a.openLocalTerminal)
 	mux.HandleFunc("GET /api/servers/{id}/terminal/options", a.terminalOptions)
+	mux.HandleFunc("GET /api/servers/{id}/directories", a.limitPreparation(a.terminalDirectories))
 	mux.HandleFunc("POST /api/servers/{id}/terminal/install/plan", a.limitPreparation(a.terminalInstallReview))
 	mux.HandleFunc("GET /api/servers/{id}/terminal/{terminal}", a.terminalSocket)
 	mux.HandleFunc("GET /api/servers/{id}/containers", a.containers)
@@ -138,6 +158,8 @@ func (a *App) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/github/connection", a.connectGithub)
 	mux.HandleFunc("DELETE /api/github/connection", a.disconnectGithub)
 	mux.HandleFunc("GET /api/github/repositories", a.githubRepositories)
+	mux.HandleFunc("GET /api/github/repository", a.githubRepositoryAccess)
+	mux.HandleFunc("POST /api/github/deploy/inspect", a.limitPreparation(a.inspectGithubDeployment))
 	mux.HandleFunc("POST /api/servers/{id}/github/plan", a.limitPreparation(a.githubPlan))
 	mux.HandleFunc("GET /api/github/deployments", a.githubDeployments)
 	mux.HandleFunc("GET /api/github/deployments/{deployment}/runs", a.githubRuns)
@@ -172,7 +194,7 @@ func (a *App) Handler(files fs.FS) http.Handler {
 					return
 				}
 			}
-			public := r.URL.Path == "/api/login" || r.URL.Path == "/api/logout" || r.URL.Path == "/api/auth/status" || r.URL.Path == "/api/auth/prepare" || r.URL.Path == "/api/auth/setup"
+			public := r.URL.Path == "/api/logout" || r.URL.Path == "/api/auth/status" || r.URL.Path == "/api/auth/prepare" || r.URL.Path == "/api/auth/passkeys/register/begin" || r.URL.Path == "/api/auth/passkeys/register/finish" || r.URL.Path == "/api/auth/passkeys/login/begin" || r.URL.Path == "/api/auth/passkeys/login/finish"
 			if !public {
 				session, err := a.session(r)
 				if err != nil {
@@ -180,7 +202,7 @@ func (a *App) Handler(files fs.FS) http.Handler {
 					return
 				}
 				if session == nil {
-					fail(w, 401, "Inicia sesión con tu PIN")
+					fail(w, 401, "Inicia sesión con tu passkey")
 					return
 				}
 			}
@@ -202,7 +224,16 @@ func (a *App) servers() ([]Server, error) {
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range out {
+		if err := a.loadManagedSSH(&out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 func (a *App) server(r *http.Request) (Server, error) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -211,6 +242,9 @@ func (a *App) server(r *http.Request) (Server, error) {
 	}
 	var s Server
 	err = a.db.QueryRow("SELECT id,name,host,port,user,identity FROM servers WHERE id=?", id).Scan(&s.ID, &s.Name, &s.Host, &s.Port, &s.User, &s.Identity)
+	if err == nil {
+		err = a.loadManagedSSH(&s)
+	}
 	return s, err
 }
 func (a *App) list(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +341,13 @@ func (a *App) remove(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec("DELETE FROM samples WHERE server_id=?", s.ID)
 	}
 	if err == nil {
+		_, err = tx.Exec("DELETE FROM terminal_workspace_sessions WHERE server_id=?", s.ID)
+	}
+	if err == nil {
 		_, err = tx.Exec("DELETE FROM terminal_sessions WHERE server_id=?", s.ID)
+	}
+	if err == nil {
+		_, err = tx.Exec("DELETE FROM server_ssh_keys WHERE server_id=?", s.ID)
 	}
 	if err == nil {
 		_, err = tx.Exec("DELETE FROM servers WHERE id=?", s.ID)

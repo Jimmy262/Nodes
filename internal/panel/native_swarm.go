@@ -31,9 +31,9 @@ func (a *App) nativeSwarmConfigurationIfPresent(ctx context.Context, s Server, c
 	c.kind = "swarm-native"
 	c.appName = name
 	c.ConnectionRequired = false
-	c.Message = "Servicio adoptado directamente por Nodo. Su definición está protegida y el traslado no depende de Dokploy. Puedes cambiar el nombre visible; la edición nativa de variables y dominios se incorporará por separado."
-	if stage != "active" {
+	if stage != "active" && stage != "restored" {
 		c.Message = "Nodo conserva la definición de este servicio y su estado de recuperación (" + stage + "). Revisa Actividad antes de volver a trasladarlo."
+		return true, nil
 	}
-	return true, nil
+	return true, a.loadSwarmConfiguration(ctx, s, c, name)
 }
