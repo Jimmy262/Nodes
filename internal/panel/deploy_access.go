@@ -47,10 +47,11 @@ type deployAccess struct {
 	Proxy                 proxyOptions
 }
 type domainStatus struct {
-	Ready      bool   `json:"ready"`
-	Host       string `json:"host"`
-	ExpectedIP string `json:"expectedIp"`
-	Message    string `json:"message"`
+	Ready      bool     `json:"ready"`
+	Host       string   `json:"host"`
+	ExpectedIP string   `json:"expectedIp"`
+	Message    string   `json:"message"`
+	Addresses  []string `json:"addresses,omitempty"`
 }
 type envValue struct {
 	Name  string `json:"name"`
@@ -246,7 +247,10 @@ func checkDomainDNS(ctx context.Context, domain, ip string) domainStatus {
 		return result
 	}
 	if !domainMatchesIP(ip, addresses) {
-		result.Message = "El DNS todavía no coincide con " + ip + ". Revisa A y AAAA. Si usas un proxy DNS/CDN, desactívalo temporalmente para comprobar el origen."
+		result.Message = "Nodes todavía resuelve el dominio a otra dirección. Revisa los registros A y AAAA o espera la propagación."
+		for _, address := range addresses {
+			result.Addresses = append(result.Addresses, address.Unmap().String())
+		}
 		return result
 	}
 	result.Ready = true
@@ -333,7 +337,8 @@ func (a *App) prepareAccess(ctx context.Context, p *operationPlan, mode, domain,
 	p.URL = scheme + "://" + domain
 	dns := checkDomainDNS(ctx, domain, proxy.PublicIP)
 	p.DNS = &dns
-	if secure && !dns.Ready {
+	p.githubDNSReady = dns.Ready
+	if secure && !dns.Ready && p.Kind != "github-setup" {
 		p.Blockers = append(p.Blockers, "Para activar HTTPS, primero conecta el DNS y vuelve a comprobarlo.")
 	}
 	used := false
@@ -351,6 +356,31 @@ func (a *App) prepareAccess(ctx context.Context, p *operationPlan, mode, domain,
 		p.Warnings = append(p.Warnings, "Traefik solicitará el certificado automáticamente. Los puertos 80 y 443 deben ser accesibles desde Internet; HTTPS puede tardar unos minutos.")
 	}
 	return nil
+}
+
+func (a *App) checkGithubPlanDNS(w http.ResponseWriter, r *http.Request) {
+	m := a.operations
+	m.mu.Lock()
+	m.expire()
+	p := m.plans[r.PathValue("operation")]
+	if p == nil || p.owner != owner(r) || p.Kind != "github-setup" || p.access == nil {
+		m.mu.Unlock()
+		fail(w, 409, "La revisión caducó. Vuelve a revisar el despliegue.")
+		return
+	}
+	domain, ip := p.access.Domain, p.access.Proxy.PublicIP
+	m.mu.Unlock()
+	dns := checkDomainDNS(r.Context(), domain, ip)
+	m.mu.Lock()
+	m.expire()
+	if m.plans[p.ID] != p {
+		m.mu.Unlock()
+		fail(w, 409, "La revisión caducó. Vuelve a revisar el despliegue.")
+		return
+	}
+	p.githubDNSReady = dns.Ready
+	m.mu.Unlock()
+	reply(w, 200, dns)
 }
 func (a *App) recheckAccess(ctx context.Context, p *operationPlan) error {
 	if p.access == nil {

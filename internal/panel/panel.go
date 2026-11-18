@@ -167,6 +167,7 @@ func (a *App) Handler(files fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/github/deployments/{deployment}/publish", a.githubPublish)
 	mux.HandleFunc("POST /api/operations/{operation}/execute", a.executeOperation)
 	mux.HandleFunc("DELETE /api/operations/{operation}/plan", a.discardPlan)
+	mux.HandleFunc("POST /api/operations/{operation}/github/dns", a.limitPreparation(a.checkGithubPlanDNS))
 	mux.HandleFunc("GET /api/operations", a.listOperations)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "Ruta no encontrada") })
 	mux.Handle("/", publicFiles(files))

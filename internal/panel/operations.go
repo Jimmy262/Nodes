@@ -45,6 +45,7 @@ type operationPlan struct {
 	edit                 *applicationEdit
 	swarm                *swarmMigration
 	github               *githubDeploymentPlan
+	githubDNSReady       bool
 	terminalInstall      *terminalInstallPlan
 }
 
@@ -283,6 +284,11 @@ func (a *App) executeOperation(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "La revisión caducó. Vuelve a revisar la operación")
 		return
 	}
+	if p.Kind == "github-setup" && p.access != nil && p.access.HTTPS && !p.githubDNSReady {
+		m.mu.Unlock()
+		fail(w, 409, "Comprueba que el DNS apunte al servidor antes de desplegar con HTTPS")
+		return
+	}
 	if len(p.Blockers) > 0 || in.Name != p.Name || !in.Acknowledged {
 		m.mu.Unlock()
 		fail(w, 400, "Confirma los efectos y escribe el nombre exacto mostrado")
@@ -333,12 +339,12 @@ func successMessage(p *operationPlan) string {
 	case "terminal-install":
 		return "Requisito instalado y comprobado. Puedes volver a abrir Codex, Claude o Terminal."
 	case "github-setup":
-		if p.github != nil && p.github.automaticPush {
-			return "Despliegue automático preparado: secretos configurados y workflow publicado. Los próximos pushes desplegarán aunque Nodes esté cerrado."
+		if p.access != nil && p.access.HTTPS {
+			return "Primer despliegue completado. Si el certificado HTTPS aún se está emitiendo, vuelve a abrir el enlace en unos minutos."
 		}
-		return "Conexión preparada y workflow publicado. Configura los secretos SSH en GitHub y pulsa Desplegar en la sección GitHub."
+		return "Primer despliegue completado y comprobado por Docker Compose."
 	case "github-push":
-		return "Secretos SSH configurados y workflow publicado. Vuelve a ejecutar el workflow fallido o haz push a la rama configurada para desplegar automáticamente."
+		return "Despliegue por push configurado. Consulta la ejecución en GitHub Actions o usa Run workflow para probar la rama."
 	case "github-deploy":
 		return "Commit desplegado y comprobado por Docker Compose. Consulta GitHub para los despliegues automáticos."
 	case "configure":

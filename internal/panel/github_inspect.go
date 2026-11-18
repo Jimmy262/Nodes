@@ -81,7 +81,12 @@ func (a *App) inspectGithubDeployment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(token)
-	data, err := a.githubProjectArchive(r.Context(), token, input.Repository, input.Branch, path.Clean(input.BuildPath))
+	commit, err := a.githubBranchCommit(r.Context(), token, input.Repository, input.Branch)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	data, err := a.githubProjectArchive(r.Context(), token, input.Repository, commit, path.Clean(input.BuildPath))
 	if err != nil {
 		fail(w, 400, err.Error())
 		return

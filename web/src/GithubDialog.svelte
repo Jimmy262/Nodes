@@ -46,7 +46,6 @@
     buildPath = '.',
     composeFile = '';
   let service = '',
-    automaticPush = true,
     port = '',
     hostPort = 8080,
     access = 'auto',
@@ -56,8 +55,10 @@
     runtimeOpen = false,
     optionsLoading = false,
     lastGeneratedName = '',
-    preparedId = '',
     reviewPanel;
+  let dnsChecking = false,
+    dnsCopyStatus = '';
+  let pushErrors = {};
   let environment = [],
     options = null,
     optionsKey = '',
@@ -85,6 +86,7 @@
     : suggested || inspection?.automatic;
   $: canReview = !!repository && !!serverId && !pending && !checkingRepository &&
     !optionsLoading && !inspectionLoading && !detected?.problem;
+  $: waitingForDNS = plan?.kind === 'github-setup' && secure && plan.dns && !plan.dns.ready;
 
   function scheduleInspection(repo, ref, folder, file) {
     clearTimeout(inspectionTimer);
@@ -297,6 +299,7 @@
     error = '';
     notice = '';
     job = null;
+    dnsCopyStatus = '';
     try {
       plan = await api(`/servers/${serverId}/github/plan`, {
         method: 'POST',
@@ -310,7 +313,6 @@
           service,
           port: Number(port),
           hostPort: Number(hostPort),
-          automaticPush,
           access,
           domain,
           https: secure,
@@ -329,6 +331,27 @@
       pending = false;
     }
   }
+  async function recheckDNS() {
+    const planId = plan.id;
+    dnsChecking = true;
+    error = '';
+    try {
+      const dns = await api(`/operations/${planId}/github/dns`, { method: 'POST' });
+      if (plan?.id === planId) plan = { ...plan, dns };
+    } catch (e) {
+      if (plan?.id === planId) error = e.message;
+    } finally {
+      dnsChecking = false;
+    }
+  }
+  async function copyDNS(ip) {
+    try {
+      await navigator.clipboard.writeText(ip);
+      dnsCopyStatus = 'IP copiada';
+    } catch {
+      dnsCopyStatus = 'Selecciona y copia la IP.';
+    }
+  }
   async function discard() {
     if (plan && !jobId) await api(`/operations/${plan.id}/plan`, { method: 'DELETE' });
     plan = null;
@@ -343,7 +366,6 @@
         body: JSON.stringify({ name: plan.name, acknowledged: true }),
       });
       jobId = data.id;
-      preparedId = plan.kind === 'github-setup' ? plan.id : '';
       job = { status: 'running', message: 'Comprobando la configuración…' };
       environment = [];
       onStarted();
@@ -396,13 +418,14 @@
     error = '';
     notice = '';
     job = null;
+    pushErrors = { ...pushErrors, [item.id]: '' };
     try {
       plan = await api(`/github/deployments/${item.id}/push/plan`, {
         method: 'POST',
         signal: AbortSignal.timeout(150000),
       });
     } catch (e) {
-      error = e.message;
+      pushErrors = { ...pushErrors, [item.id]: e.message };
     } finally {
       pending = false;
     }
@@ -509,8 +532,9 @@
       <details class="gh-inline-help">
         <summary>Qué permisos necesita el token</summary>
         <p>
-          Incluye los repositorios que usarás. Contents y Workflows: lectura y escritura. Actions:
-          lectura. Secrets: lectura y escritura para configurar los pushes automáticamente. Si tu organización lo exige, autoriza el token allí. Nodes lo guarda cifrado.
+          Selecciona los repositorios que gestionarás en Nodes. Para desplegar desde el panel, usa Contents: lectura.
+          Para activar los pushes, también necesitas Contents, Workflows y Secrets: lectura y escritura.
+          Actions: lectura permite ver la actividad. Nodes guarda el token cifrado.
         </p>
       </details>
       <div class="button-row">
@@ -577,7 +601,7 @@
           >
           <p>{job.message}</p>
           {#if job.status === 'running'}<small
-              >Mantén Nodes abierto. Puedes seguir el progreso en Actividad.</small
+              >Puedes seguir el progreso en Actividad.</small
             >{/if}
         </div>
       </div>{/if}
@@ -626,14 +650,14 @@
                     size={13}
                   /></a
                 >{:else}<p class="small muted">
-                  Aún no hay ejecuciones. Completa la configuración del push y envía un commit.
+                  Aún no hay ejecuciones de GitHub Actions para esta aplicación.
                 </p>{/each}
             </div>{/if}
           <GithubPushSetup
             deployment={item}
             server={servers.find((server) => server.id === item.serverId)}
-            open={item.id === preparedId}
             {pending}
+            permissionError={pushErrors[item.id]}
             onPublish={publish}
             onActivate={activatePush}
           />
@@ -700,7 +724,11 @@
                       {/each}
                     </div>
                   {:else}
-                    <p>Indica otro archivo del repositorio o añade un Compose autónomo a esta rama.</p>
+                    <p>Selecciona otro archivo o publica en {branch} un Compose autónomo con todos los servicios. Luego vuelve a comprobar el repositorio.</p>
+                    <div class="button-row">
+                      <a class="text-button" href={`https://github.com/${repository}`} target="_blank" rel="noopener noreferrer">Abrir repositorio</a>
+                      <button type="button" class="secondary" on:click={() => scheduleInspection(repository, branch, buildPath, composeFile)}>Volver a comprobar</button>
+                    </div>
                   {/if}
                 </div>
               {:else if detected}
@@ -858,15 +886,6 @@
                   carpetas relativas pertenecen a cada versión del código.
                 </p>
               </details>
-              <label class="deploy-checkbox"
-                ><input type="checkbox" bind:checked={automaticPush} /><span
-                  >Configurar automáticamente el despliegue por push</span
-                ></label
-              >
-              <p class="small muted">
-                Se creará una clave exclusiva para Actions. El token necesita permiso Secrets:
-                lectura y escritura.
-              </p>
             </div>
           </details>
         </fieldset>
@@ -892,7 +911,7 @@
 
     {#if plan && !jobId}<section class="gh-review" aria-live="polite" bind:this={reviewPanel}>
         <p class="gh-field-hint">
-          {plan.kind === 'github-setup' ? 'Preparación inicial · 1 de 2' : 'Despliegue manual'}
+          {plan.kind === 'github-setup' ? 'Primer despliegue' : plan.kind === 'github-push' ? 'GitHub Actions' : 'Despliegue manual'}
         </p>
         <h3>{plan.name}</h3>
         <dl class="gh-review-facts">
@@ -921,17 +940,28 @@
           {#each plan.review?.summary || plan.summary as line}<li>{line}</li>{/each}
         </ul>
         {#if plan.kind === 'github-setup'}<p class="gh-next-step">
-            {automaticPush
-              ? 'Los secretos SSH se configurarán automáticamente antes de publicar el workflow.'
-              : 'Después: añade los secretos SSH en GitHub para activar los pushes.'}
+            Podrás activar el despliegue por push después de publicar la aplicación.
           </p>{/if}
-        {#if plan.dns}<p class="small" class:warning={!plan.dns.ready}>{plan.dns.message}</p>{/if}
+        {#if plan.dns}
+          <div class="notice" class:warning={!plan.dns.ready}>
+            <p role="status">{plan.dns.message}</p>
+            {#if !plan.dns.ready && plan.dns.expectedIp}
+              <p>En tu proveedor DNS, apunta <strong>{plan.dns.host}</strong> a <code>{plan.dns.expectedIp}</code> con un registro A.</p>
+              {#if plan.dns.addresses?.length}<p>Nodes detecta <code>{plan.dns.addresses.join(', ')}</code>.</p>{/if}
+              <div class="button-row">
+                <button type="button" class="secondary" on:click={() => copyDNS(plan.dns.expectedIp)}>Copiar IP</button>
+                <button type="button" class="secondary" disabled={dnsChecking} on:click={recheckDNS}>{dnsChecking ? 'Comprobando…' : 'Volver a comprobar DNS'}</button>
+                {#if dnsCopyStatus}<small role="status">{dnsCopyStatus}</small>{/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
         {#each plan.blockers as blocker}<p class="notice error" role="alert">{blocker}</p>{/each}
         <ul class="gh-review-warnings">
           {#each plan.review?.warnings || plan.warnings as warning}<li>{warning}</li>{/each}
         </ul>
         <details class="gh-form-options">
-          <summary>Detalles técnicos y workflow</summary>
+          <summary>{plan.workflow ? 'Detalles técnicos y workflow' : 'Detalles técnicos'}</summary>
           <div>
             <ul>
               {#each plan.summary as line}<li>{line}</li>{/each}
@@ -945,17 +975,17 @@
         <footer class="gh-flow-footer">
           <span
             >{plan.kind === 'github-setup'
-              ? 'Se preparará la VPS y se publicará el workflow.'
+              ? 'Nodes desplegará el commit revisado en la VPS.'
               : plan.kind === 'github-push'
                 ? 'Se configurarán los secretos y el acceso para los pushes.'
                 : 'Se actualizará la aplicación en el servidor.'}</span
           >
           <div>
-            <button class="primary" disabled={pending || !!plan.blockers.length} on:click={execute}
+            <button class="primary" disabled={pending || dnsChecking || waitingForDNS || !!plan.blockers.length} on:click={execute}
               >{pending
                 ? 'Iniciando…'
                 : plan.kind === 'github-setup'
-                  ? 'Conectar y preparar'
+                  ? 'Desplegar aplicación'
                   : plan.kind === 'github-push'
                     ? 'Activar despliegue automático'
                     : 'Desplegar commit'}</button
